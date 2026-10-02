@@ -8,7 +8,7 @@ if [ -x /etc/init.d/steer ]; then
 	/etc/init.d/steer stop 2>/dev/null
 	/etc/init.d/steer disable 2>/dev/null
 	if [ -f /etc/steer/spec.json ] || [ -f /etc/steer/spec.yaml ]; then
-		echo "steer-box-connector: служба steer выключена — движок ведёт коннектор; спека в /etc/steer сохранена"
+		echo "steer-box-connector: служба steer выключена — ядро ведёт коннектор; спека в /etc/steer сохранена"
 	fi
 fi
 # Методы ubus страницы (rpcd: /usr/libexec/rpcd/steer-box) rpcd читает при старте — без

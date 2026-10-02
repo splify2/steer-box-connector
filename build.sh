@@ -44,7 +44,7 @@ if [ ! -x "$IPKG" ]; then
 fi
 
 NAME=steer-box-connector
-DESC="steer-box-connector: sing-box для podkop и forkop на движке steer (вместо пакета sing-box)"
+DESC="steer-box-connector: sing-box для podkop и forkop на ядре steer (вместо пакета sing-box)"
 # Ставится ВМЕСТО пакетов sing-box (их бинарник /usr/bin/sing-box и служба /etc/init.d/sing-box —
 # то, что зовут podkop и forkop): конфликтует с ними и берёт на себя их имя.
 CONFLICTS="sing-box sing-box-tiny sing-box-extended"

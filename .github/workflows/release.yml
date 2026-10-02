@@ -46,7 +46,7 @@ jobs:
             out/*.ipk
             out/*.tar.gz
           body: |
-            sing-box для podkop и forkop на движке steer ${{ env.VERSION }}.
+            sing-box для podkop и forkop на ядре steer ${{ env.VERSION }}.
 
             **Проще всего — тестовый набор** `steer-box-connector-test-${{ env.VERSION }}.tar.gz`:
             в нём пакеты коннектора и steer той же версии под все архитектуры и `install.sh`.

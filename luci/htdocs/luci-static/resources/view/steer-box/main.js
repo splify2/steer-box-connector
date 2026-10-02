@@ -10,7 +10,7 @@ var callReleases = rpc.declare({ object: 'steer-box', method: 'releases' });
 var callInstall = rpc.declare({ object: 'steer-box', method: 'install', params: ['version', 'packages'] });
 
 var NAMES = {
-	'steer-core': _('Движок'),
+	'steer-core': _('Ядро steer'),
 	'steer-vless': 'VLESS',
 	'steer-hysteria2': 'Hysteria2',
 	'steer-proxy': 'Trojan, Shadowsocks, SOCKS, HTTP, VMess',
@@ -113,7 +113,7 @@ return view.extend({
 		var m, s, o;
 
 		m = new form.Map('steer-box', _('Steer Connector'),
-			_('sing-box для podkop и forkop на движке steer.'));
+			_('sing-box для podkop и forkop на ядре steer.'));
 
 		s = m.section(form.NamedSection, 'main', 'steer-box', _('Каким sing-box представляться'));
 		o = s.option(form.ListValue, 'variant', _('Вариант'));

@@ -302,7 +302,7 @@ static void child_env_set(const struct box_settings *set) {
 static void child_env(struct box_rt *rt) { child_env_set(&rt->set); }
 
 int box_validate_spec(const struct box_settings *set, const char *spec, const char *state, char *err, size_t errn) {
-    if (access(set->steerd, X_OK)) { snprintf(err, errn, "нет движка %s", set->steerd); return -1; }
+    if (access(set->steerd, X_OK)) { snprintf(err, errn, "нет ядра steer %s", set->steerd); return -1; }
     int pfd[2];
     if (pipe2(pfd, O_CLOEXEC)) { snprintf(err, errn, "pipe: %s", strerror(errno)); return -1; }
     pid_t pid = fork();
@@ -430,7 +430,7 @@ static int reap_orphans(struct box_rt *rt) {
     }
     closedir(d);
     for (int i = 0; i < n; i++) {
-        LOGW("движок прежнего запуска (pid %d) ещё работает — гашу его", (int)pids[i]);
+        LOGW("ядро steer прежнего запуска (pid %d) ещё работает — гашу его", (int)pids[i]);
         kill(pids[i], SIGTERM);
     }
     for (int t = 0; t < 100 && n; t++) {
@@ -815,7 +815,7 @@ int cmd_run(const struct box_opts *o) {
     if (sb_check(rt.cfg, &ck)) { fprintf(stderr, "FATAL[0000] %s\n", ck.first); return 1; }
     apply_cfg_globals(&rt, rt.cfg);
     if (access(rt.set.steerd, X_OK)) {
-        fprintf(stderr, "FATAL[0000] нет движка %s — поставьте steer-core (страница Services → Steer Connector)\n",
+        fprintf(stderr, "FATAL[0000] нет ядра steer %s — поставьте steer-core (страница Services → Steer Connector)\n",
                 rt.set.steerd);
         return 1;
     }
@@ -834,7 +834,7 @@ int cmd_run(const struct box_opts *o) {
          * (раньше, чем узнал о коннекторе). Ей нечего вести, а таблицы маршрутизации у неё те же,
          * что у нашего экземпляра, — останавливаем и выключаем её, как это сделала бы страница
          * коннектора. */
-        LOGW("служба steer (pid %d) работает без своей спеки — останавливаю: движок ведёт коннектор", other);
+        LOGW("служба steer (pid %d) работает без своей спеки — останавливаю: ядро ведёт коннектор", other);
         const char *stop[] = { "/etc/init.d/steer", "stop", NULL };
         const char *dis[] = { "/etc/init.d/steer", "disable", NULL };
         run_cmd(stop, NULL, 0);
@@ -843,7 +843,7 @@ int cmd_run(const struct box_opts *o) {
     }
     if (other) {
         fprintf(stderr, "FATAL[0000] работает служба steer со своей спекой (pid %d) — коннектор ведёт "
-                        "свой экземпляр движка, и делить с ней таблицы он не может; остановите её "
+                        "свой экземпляр ядра, и делить с ней таблицы он не может; остановите её "
                         "(/etc/init.d/steer stop && /etc/init.d/steer disable) или уберите /etc/steer/spec.*\n", other);
         return 1;
     }

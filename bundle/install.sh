@@ -1,6 +1,6 @@
 #!/bin/sh
 # Установка тестового набора steer-box-connector на роутер: steer-core, модули протоколов
-# (vless, hysteria2, proxy) и сам коннектор — sing-box для podkop и forkop на движке steer.
+# (vless, hysteria2, proxy) и сам коннектор — sing-box для podkop и forkop на ядре steer.
 # Запуск на роутере из распакованного каталога: sh install.sh
 #
 # Из фидов OpenWrt здесь ничего нет: то, что пакетам нужно оттуда, менеджер пакетов скачает сам

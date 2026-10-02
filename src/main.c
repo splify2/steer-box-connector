@@ -221,7 +221,7 @@ static void usage(void) {
          "  -C, --config-directory stringArray   set configuration directory path\n"
          "  -D, --directory string               set working directory\n"
          "      --disable-color                  disable color output\n\n"
-         "steer-box-connector " BOX_VERSION ": sing-box на движке steer");
+         "steer-box-connector " BOX_VERSION ": sing-box на ядре steer");
 }
 
 static int push(const char ***arr, size_t *n, const char *v) {

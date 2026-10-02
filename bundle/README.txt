@@ -2,13 +2,13 @@ steer-box-connector @VERSION@ — тестовый набор
 =============================================
 
 Что это. Замена пакета sing-box для podkop и forkop. Команда `sing-box run` переводит конфиг,
-который пишут podkop или forkop, в спеку steer, и маршрутизацию ведёт движок steer в ядре —
+который пишут podkop или forkop, в спеку steer, и маршрутизацию ведёт ядро steer средствами ядра Linux —
 без TPROXY и без прокси в пространстве пользователя для простых выходов. Сами podkop и forkop
 не меняются: ставятся отдельно, из своих выпусков, как обычно.
 
 Что внутри. Только наши пакеты, по каталогу на архитектуру (packages/<архитектура>), в двух
 форматах — .apk (OpenWrt 25.12, apk) и .ipk (OpenWrt на opkg):
-  steer-core           движок
+  steer-core           ядро steer
   steer-vless          VLESS / Reality
   steer-hysteria2      hysteria2
   steer-proxy          trojan, shadowsocks, socks, http, vmess
@@ -49,7 +49,7 @@ steer-box-connector @VERSION@ — тестовый набор
   - Диагностика forkop показывает два ⚠ — это не поломка:
       «Счётчики правил proxy» — счётчик forkop стоит за tproxy, а прозрачного сокета нет
       (коннектор работает без TPROXY), поэтому он всегда 0;
-      «Найдены дополнительные правила маркировки» — это таблица inet sbox движка steer.
+      «Найдены дополнительные правила маркировки» — это таблица inet sbox ядра steer.
   - Пока не переводится: действие reject и блокировка QUIC, выход через routing_mark zapret,
     серверный режим forkop, `sing-box generate tls-keypair`. О первых трёх коннектор
     предупреждает в журнале при запуске («… пока не переводится»). Подмена порта (route-options
