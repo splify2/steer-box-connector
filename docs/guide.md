@@ -34,12 +34,18 @@ forkop не меняются и ставятся из своих выпуско�
 
 - действие `reject` и блокировку QUIC;
 - выход direct с `routing_mark` (zapret у forkop);
-- серверный режим forkop;
+- серверный режим forkop, кроме сервера socks;
 - `sing-box generate tls-keypair`.
 
-О первых трёх коннектор предупреждает в журнале при запуске. В диагностике forkop остаются два
-⚠ — «Rules proxy counters» и «Additional marking rules found». Это проверки механики TPROXY,
-которой коннектор не пользуется, а не поломка.
+О первых двух коннектор предупреждает в журнале при запуске, а правила с ними снимает. С сервером
+forkop vless, vmess, trojan, hysteria2, shadowsocks, mtproxy, tailscale или из JSON коннектор не
+запускается вовсе: `sing-box check` и `sing-box run` отказывают с причиной («вход типа «vless»
+коннектор пока не поддерживает», «endpoints[0]: tailscale коннектор не поддерживает»), и forkop
+с включённым сервером не стартует. Сервер socks принимает соединения (CONNECT, с паролем и без,
+без UDP), но правила секций forkop к ним не применяются: всё уходит в `route.final`.
+
+В диагностике forkop остаются два ⚠ — «Rules proxy counters» и «Additional marking rules found».
+Это проверки механики TPROXY, которой коннектор не пользуется, а не поломка.
 
 ## Установка
 
