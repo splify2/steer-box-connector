@@ -2,8 +2,8 @@
 # Стенды коннектора на машине разработки: каждая проверка tests/t_*.c собирается cc хоста с
 # ASan и UBSan и запускается. Проверка берёт часть коннектора целиком (#include "../src/x.c" —
 # чтобы видеть её статические функции) и строкой «// deps:» называет остальные исходники, с
-# которыми линкуется; то, до чего проверка не доходит (TLS, Reality из steer), остаётся
-# неразрешённым.
+# которыми линкуется (строкой «// ldflags:» — ключи компоновщика); то, до чего проверка не
+# доходит (TLS, Reality из steer), остаётся неразрешённым.
 #
 #   sh tests/run.sh            все проверки
 #   sh tests/run.sh t_json     одна (по имени файла без .c)
@@ -19,10 +19,11 @@ for t in tests/t_*.c; do
     n=$(basename "$t" .c)
     [ $# -gt 0 ] && { case " $* " in *" $n "*) ;; *) continue ;; esac; }
     deps=$(sed -n 's|^// deps: ||p' "$t")
+    ldflags=$(sed -n 's|^// ldflags: ||p' "$t")
     # shellcheck disable=SC2086
     if ! $CC -g -O1 -D_GNU_SOURCE -fsanitize=address,undefined -fno-omit-frame-pointer \
             -Wno-macro-redefined -Wno-builtin-macro-redefined $INC -o "$OUT/$n" "$t" $deps \
-            -lpthread -lm -Wl,--unresolved-symbols=ignore-all 2>"$OUT/$n.cc"; then
+            -lpthread -lm -Wl,--unresolved-symbols=ignore-all $ldflags 2>"$OUT/$n.cc"; then
         echo "FAIL $n (сборка: $OUT/$n.cc)"
         fail=1
         continue

@@ -482,8 +482,14 @@ static int enqueue(struct dnsup *u, struct ujob *j) {
     maybe_spawn_locked(u);
     pthread_cond_signal(&u->cv);
     int none = u->workers == 0;
+    if (none) {
+        /* Некому отвечать (поток не завёлся): задание — с очереди, его освободит вызывающий. */
+        struct ujob **pp = &u->head, *prev = NULL;
+        for (; *pp; prev = *pp, pp = &(*pp)->next)
+            if (*pp == j) { *pp = j->next; if (u->tail == j) u->tail = prev; break; }
+    }
     pthread_mutex_unlock(&u->mu);
-    return none ? -1 : 0;            /* некому отвечать */
+    return none ? -1 : 0;
 }
 
 int dnsup_ask(struct dnsup *u, const uint8_t *q, size_t n, dnsup_cb cb, void *arg) {
@@ -494,12 +500,6 @@ int dnsup_ask(struct dnsup *u, const uint8_t *q, size_t n, dnsup_cb cb, void *ar
     j->cb = cb;
     j->arg = arg;
     if (enqueue(u, j)) {
-        /* Задание в очереди, но потока нет: снимаем его, чтобы не ответить дважды. */
-        pthread_mutex_lock(&u->mu);
-        struct ujob **pp = &u->head, *prev = NULL;
-        for (; *pp; prev = *pp, pp = &(*pp)->next)
-            if (*pp == j) { *pp = j->next; if (u->tail == j) u->tail = prev; break; }
-        pthread_mutex_unlock(&u->mu);
         free(j->q);
         free(j);
         return -1;
