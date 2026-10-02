@@ -93,6 +93,10 @@ pack_ipk() {  # АРХ ДЕРЕВО
         echo "Provides: sing-box"
         echo "Description: $DESC"
     } > "$2/CONTROL/control"
+    # Настройки — conffiles: opkg при обновлении не затирает правленый файл, а кладёт новый рядом
+    # (-opkg). Без этого обновление сбрасывало страницу LuCI к умолчаниям и enabled podkop/forkop
+    # в /etc/config/sing-box — в 0. Для sysupgrade тот же список — lib/upgrade/keep.d (оба формата).
+    cp "$2/lib/upgrade/keep.d/steer-box-connector" "$2/CONTROL/conffiles"
     for _h in postinst prerm postrm; do cp "scripts/$_h" "$2/CONTROL/$_h"; chmod 0755 "$2/CONTROL/$_h"; done
     if "$ROOT/$IPKG" "$2" "$OUT" >/dev/null 2>&1; then
         mv "$OUT/${NAME}_${VERSION}-1_$1.ipk" "$OUT/$NAME-$VERSION-1_$1.ipk" 2>/dev/null || true
