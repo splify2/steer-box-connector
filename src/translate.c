@@ -393,6 +393,19 @@ static int narrow_merge(struct tr *t, struct narrow *dst, const struct narrow *r
     return 0;
 }
 
+/* Сужение списка steer: proto и ports («443,50000-65535» → [443, "50000-65535"]). */
+static void list_narrow(struct jval *l, const struct narrow *nw) {
+    if (nw->tcp != nw->udp) jobj_set(l, "proto", jstr(nw->tcp ? "tcp" : "udp"));
+    if (!nw->ports[0]) return;
+    struct jval *a = jnew(J_ARR);
+    char buf[1024];
+    snprintf(buf, sizeof buf, "%s", nw->ports);
+    char *save;
+    for (char *s = strtok_r(buf, ",", &save); s; s = strtok_r(NULL, ",", &save))
+        jarr_push(a, strchr(s, '-') ? jstr(s) : jint(strtol(s, NULL, 10)));
+    jobj_set(l, "ports", a);
+}
+
 /* Завести список steer из ожидающего. Возвращает имя или NULL (пустой список — не заводится). */
 static const char *emit_list(struct tr *t, struct pending_list *pl, const char *tag) {
     if (!pl->srs && !pl->dom.n && !pl->pfx.n) return NULL;
@@ -421,15 +434,7 @@ static const char *emit_list(struct tr *t, struct pending_list *pl, const char *
         jarr_push(a, jstr(path));
         jobj_set(l, "prefixes_file", a);
     }
-    if (pl->nw.tcp != pl->nw.udp) jobj_set(l, "proto", jstr(pl->nw.tcp ? "tcp" : "udp"));
-    if (pl->nw.ports[0]) {
-        struct jval *a = jnew(J_ARR);
-        char buf[1024];
-        snprintf(buf, sizeof buf, "%s", pl->nw.ports);
-        for (char *s = strtok(buf, ","); s; s = strtok(NULL, ","))
-            jarr_push(a, strchr(s, '-') ? jstr(s) : jint(strtol(s, NULL, 10)));
-        jobj_set(l, "ports", a);
-    }
+    list_narrow(l, &pl->nw);
     if (t->override_port > 0) jobj_set(l, "override_port", jint(t->override_port));
     jobj_set(t->lists, name, l);
     return name;
@@ -1177,7 +1182,7 @@ static int emit_rule_ex(struct tr *t, size_t idx, const struct jval *r, const ch
             ln = names_get(&t->lnames, key, NULL);
             struct jval *l = jnew(J_OBJ);
             jobj_set(l, "all", jbool(1));
-            if (all.nw.tcp != all.nw.udp) jobj_set(l, "proto", jstr(all.nw.tcp ? "tcp" : "udp"));
+            list_narrow(l, &all.nw);
             jobj_set(t->lists, ln, l);
             struct jval *to = jnew(J_ARR);
             jarr_push(to, jstr(ln));
