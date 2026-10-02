@@ -408,7 +408,9 @@ static void dnsd_cb(struct ev *ev, int fd, uint32_t e, void *arg) {
 
 /* ---- правила ---------------------------------------------------------------------------- */
 
-enum mres { M_NO, M_YES, M_DEFER };
+/* M_UNSUP — в правиле условие, которого коннектор не сверяет: правило не совпадает ни само, ни
+ * под invert (не «не совпало» — его инверсия была бы совпадением со всеми вопросами). */
+enum mres { M_NO, M_YES, M_DEFER, M_UNSUP };
 
 static int list_has(const struct jval *v, const char *s) {
     long n = jstrlist(v, NULL, 0);
@@ -477,7 +479,7 @@ static enum mres match_default(struct qctx *c, const struct jval *r) {
         int ok = 0;
         for (int k = 0; known[k]; k++)
             if (!strcmp(r->o[i].key, known[k])) ok = 1;
-        if (!ok) return M_NO;
+        if (!ok) return M_UNSUP;
     }
     const struct jval *v;
     if ((v = jget(r, "inbound")) && !list_has(v, c->l->tag)) return M_NO;
@@ -528,17 +530,19 @@ static enum mres match_rule(struct qctx *c, const struct jval *r) {
         const char *mode = jgets(r, "mode");
         int is_and = mode && !strcmp(mode, "and");
         const struct jval *sub = jget(r, "rules");
-        int any_defer = 0, any_yes = 0, any_no = 0;
+        int any_defer = 0, any_yes = 0, any_no = 0, any_unsup = 0;
         for (size_t i = 0; i < jlen(sub); i++) {
             enum mres x = match_rule(c, jat(sub, i));
             if (x == M_YES) any_yes = 1;
             else if (x == M_DEFER) any_defer = 1;
+            else if (x == M_UNSUP) any_unsup = 1;
             else any_no = 1;
         }
-        if (is_and) m = any_no ? M_NO : any_defer ? M_DEFER : M_YES;
-        else m = any_yes ? M_YES : any_defer ? M_DEFER : M_NO;
+        if (is_and) m = any_no ? M_NO : any_unsup ? M_UNSUP : any_defer ? M_DEFER : M_YES;
+        else m = any_yes ? M_YES : any_unsup ? M_UNSUP : any_defer ? M_DEFER : M_NO;
     } else m = match_default(c, r);
     if (jgetb(r, "invert", 0)) {
+        if (m == M_UNSUP) return M_UNSUP;
         if (m == M_DEFER) return M_NO;   /* «имя не в наборе» dnsd не отвечает — не угадываем */
         return m == M_YES ? M_NO : M_YES;
     }
@@ -568,7 +572,7 @@ static void eval(struct qctx *c) {
     while (c->next_rule < jlen(rules)) {
         const struct jval *r = jat(rules, c->next_rule++);
         enum mres m = match_rule(c, r);
-        if (m == M_NO) continue;
+        if (m == M_NO || m == M_UNSUP) continue;
         const char *act = jgets(r, "action");
         if (!act) act = "route";
         if (m == M_DEFER) {
