@@ -30,6 +30,8 @@
 
 #define DNSD_OPT_NOFORWARD 65001
 #define DNSD_PORT 5300
+#define DNSD_RETRY_MS 50        /* повтор вопросов к dnsd после ECONNREFUSED (dnsd_resend) */
+#define DNSD_GIVEUP_MS 2000     /* дольше вопрос dnsd не ждёт — разбор правил идёт дальше */
 
 struct listener {
     int fd, udp;
@@ -66,6 +68,7 @@ struct dns_srv {
     struct qctx *dnsd_wait[65536];
     uint16_t dnsd_seq;
     uint64_t dnsd_retry;        /* таймер повтора вопросов к dnsd (он ещё не слушал) */
+    uint64_t dnsd_sweep;        /* таймер срока вопросов к dnsd (ответ потерян) */
     struct upent *ups;
     size_t nups;
     const char *final;
@@ -264,6 +267,7 @@ static struct upent *up_find(struct dns_srv *s, const char *tag) {
 
 static void eval(struct qctx *c);
 static void ask_dnsd(struct qctx *c, int must);
+static void dnsd_sweep_cb(struct ev *ev, void *arg);
 
 struct upwait { struct qctx *c; long rewrite; int disable_cache; char tag[128]; };
 
@@ -372,7 +376,9 @@ static void ask_dnsd(struct qctx *c, int must) {
     if (send(s->dnsd_fd, buf, n, 0) != (ssize_t)n) {
         s->dnsd_wait[id] = NULL;
         must ? resolve_with(c, s->final) : eval(c);
+        return;
     }
+    if (!s->dnsd_sweep) s->dnsd_sweep = ev_timer(s->rt->ev, DNSD_GIVEUP_MS, dnsd_sweep_cb, s);
 }
 
 /* ПОВТОР ВОПРОСОВ К DNSD. dnsd не слушает (steer только стартует, резолвер перезапускается) —
@@ -380,9 +386,6 @@ static void ask_dnsd(struct qctx *c, int must) {
  * двух секунд (выбросы в замере перезапуска на роутере — 3 с вместо 1). Теперь ждущие вопросы
  * уходят к dnsd снова через 50 мс; кто ждёт дольше двух секунд — идёт дальше по правилам, как при
  * отказе dnsd. */
-#define DNSD_RETRY_MS 50
-#define DNSD_GIVEUP_MS 2000
-
 static void dnsd_resend(struct ev *ev, void *arg) {
     (void)ev;
     struct dns_srv *s = arg;
@@ -402,6 +405,24 @@ static void dnsd_resend(struct ev *ev, void *arg) {
         s->dnsd_wait[id] = NULL;
         c->must_fake ? resolve_with(c, s->final) : eval(c);
     }
+}
+
+/* СРОК. Ответ dnsd может и потеряться без ECONNREFUSED: dnsd перезапускается, и датаграммы в
+ * очереди старого сокета пропадают. Вопрос, ждущий дольше DNSD_GIVEUP_MS, идёт дальше по
+ * правилам, как при отказе dnsd; иначе он висел бы до конца работы, а клиент ждал бы зря. */
+static void dnsd_sweep_cb(struct ev *ev, void *arg) {
+    struct dns_srv *s = arg;
+    s->dnsd_sweep = 0;
+    long long now = ev_now_ms();
+    int left = 0;
+    for (unsigned id = 0; id < 65536; id++) {
+        struct qctx *c = s->dnsd_wait[id];
+        if (!c) continue;
+        if (now - c->dnsd_since < DNSD_GIVEUP_MS) { left = 1; continue; }
+        s->dnsd_wait[id] = NULL;
+        c->must_fake ? resolve_with(c, s->final) : eval(c);
+    }
+    if (left && !s->dnsd_sweep) s->dnsd_sweep = ev_timer(ev, DNSD_GIVEUP_MS / 4, dnsd_sweep_cb, s);
 }
 
 static void dnsd_cb(struct ev *ev, int fd, uint32_t e, void *arg) {
@@ -925,6 +946,7 @@ void dns_stop(struct box_rt *rt) {
     s->dead = 1;
     s->refs++;                  /* свой, до конца останова */
     if (s->dnsd_retry) ev_timer_cancel(rt->ev, s->dnsd_retry);
+    if (s->dnsd_sweep) ev_timer_cancel(rt->ev, s->dnsd_sweep);
     if (s->dnsd_fd >= 0) { ev_del(rt->ev, s->dnsd_fd); close(s->dnsd_fd); }
     /* Вопросы, ждавшие dnsd, — без ответа (слушатели закрыты): клиент переспросит новый вход. */
     for (size_t i = 0; i < 65536; i++)

@@ -64,6 +64,8 @@ int rt_egress(struct box_rt *rt, const char *tag, struct egress *eg, char *err, 
 }
 
 /* ---- подставной dnsd -------------------------------------------------------------------- */
+static const char *volatile g_dnsd_drop;    /* имя с этой подстрокой dnsd молча теряет */
+
 static void *dnsd_thread(void *p) {
     int fd = *(int *)p;
     for (;;) {
@@ -72,6 +74,8 @@ static void *dnsd_thread(void *p) {
         socklen_t al = sizeof a;
         ssize_t n = recvfrom(fd, b, sizeof b, 0, (struct sockaddr *)&a, &al);
         if (n < 12) continue;
+        struct dnsq dq;
+        if (g_dnsd_drop && !dnsq_parse(b, (size_t)n, &dq) && strstr(dq.name, g_dnsd_drop)) continue;
         b[2] = 0x81;
         b[3] = 0x85;                          /* REFUSED */
         sendto(fd, b, (size_t)n, 0, (struct sockaddr *)&a, al);
