@@ -1,0 +1,39 @@
+#!/bin/sh /etc/rc.common
+# sing-box от steer-box-connector: перевод конфига sing-box в спеку steer (podkop, forkop).
+#
+# START=99 и секция main в /etc/config/sing-box — то, что ждут podkop и forkop от службы
+# sing-box: они сами ставят enabled, user и conffile, сами запускают и останавливают службу и
+# выключают её автозапуск (по /etc/rc.d/S99sing-box). `reload` — обычный procd: при изменённом
+# конфиге (параметр file) процесс перезапускается, и PID меняется — по этому forkop понимает, что
+# новый конфиг принят; при прежнем — ничего. SIGHUP (так forkop переключает DNS при отказе
+# сервера) коннектор понимает сам: перечитывает конфиг на месте.
+
+USE_PROCD=1
+START=99
+PROG=/usr/bin/sing-box
+
+start_service() {
+	config_load sing-box
+	local enabled conffile workdir
+	config_get_bool enabled main enabled 0
+	[ "$enabled" -eq 1 ] || return 0
+	config_get conffile main conffile /etc/sing-box/config.json
+	config_get workdir main workdir /usr/share/sing-box
+	mkdir -p "$workdir"
+
+	procd_open_instance
+	procd_set_param command "$PROG" run -c "$conffile" -D "$workdir"
+	procd_set_param file "$conffile" /etc/config/steer-box
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param limits nofile="65535 65535"
+	procd_set_param respawn 3600 5 0
+	# Остановка — погасить движок (до 10 с) и снять его правила: умолчания procd (5 с) не
+	# хватает, и SIGKILL оставлял steerd без родителя.
+	procd_set_param term_timeout 20
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger sing-box steer-box
+}

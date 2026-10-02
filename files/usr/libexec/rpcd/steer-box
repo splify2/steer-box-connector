@@ -1,0 +1,138 @@
+#!/bin/sh
+# rpcd: страница Services → Steer Connector (luci-app-steer-box-connector).
+#
+#   status    что показывает sing-box (вариант, версия), служба, steer-core и модули: стоит ли,
+#             какая версия, нужен ли текущему конфигу (sing-box box-needs);
+#   releases  версии steer на GitHub (xyzmean/steer);
+#   install   поставить выбранной версии steer-core и модули (по умолчанию — те, что нужны).
+#
+# Пакеты ставятся с релизов steer, как у splify2: их нет в feeds OpenWrt.
+
+. /usr/share/libubox/jshn.sh
+
+REPO=xyzmean/steer
+CONF=$(uci -q get sing-box.main.conffile)
+[ -n "$CONF" ] || CONF=/etc/sing-box/config.json
+
+pkg_ext() { command -v apk >/dev/null 2>&1 && echo apk || echo ipk; }
+
+pkg_arch() {
+	# Архитектура пакетов OpenWrt (aarch64_cortex-a53), а не машины: `apk --print-arch` на 25.12
+	# отвечает aarch64, а пакеты steer названы по DISTRIB_ARCH.
+	local DISTRIB_ARCH=""
+	[ -f /etc/openwrt_release ] && . /etc/openwrt_release
+	if [ -n "$DISTRIB_ARCH" ]; then
+		echo "$DISTRIB_ARCH"
+	elif command -v apk >/dev/null 2>&1; then
+		apk --print-arch 2>/dev/null
+	else
+		opkg print-architecture 2>/dev/null | awk '$1=="arch" && $2!="all" && $2!="noarch" {a=$2} END {print a}'
+	fi
+}
+
+pkg_version() {
+	if command -v apk >/dev/null 2>&1; then
+		apk info -e "$1" >/dev/null 2>&1 || return 0
+		apk list -I "$1" 2>/dev/null | awk -v p="$1" '{ v=$1; sub("^" p "-", "", v); sub("-r[0-9]+$", "", v); print v; exit }'
+	else
+		opkg status "$1" 2>/dev/null | awk '/^Version:/ { v=$2; sub("-[0-9]+$", "", v); print v }'
+	fi
+}
+
+fetch() {  # URL ФАЙЛ
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL -m 120 -o "$2" "$1"
+	else
+		wget -q -T 120 -O "$2" "$1"
+	fi
+}
+
+case "$1" in
+list)
+	echo '{ "status": {}, "releases": {}, "install": { "version": "", "packages": [] } }'
+	;;
+call)
+	case "$2" in
+	status)
+		json_init
+		ver_line=$(/usr/bin/sing-box version 2>/dev/null | head -n1)
+		json_add_string sing_box "${ver_line#sing-box version }"
+		json_add_string variant "$(uci -q get steer-box.main.variant)"
+		json_add_string version "$(uci -q get steer-box.main.version)"
+		running=0
+		pgrep -f '^/usr/bin/sing-box ' >/dev/null 2>&1 && running=1
+		json_add_boolean running "$running"
+		json_add_string arch "$(pkg_arch)"
+		# Самая старая версия steer, с которой работает этот коннектор (его пакет зависит от
+		# steer-core той же версии).
+		json_add_string steer_min "$(/usr/bin/sing-box version 2>/dev/null | sed -n 's/.*steer-box-connector \([0-9.]*\).*/\1/p' | head -n1)"
+		needs=$(/usr/bin/sing-box -c "$CONF" box-needs 2>/dev/null)
+		json_add_array packages
+		for p in steer-core steer-vless steer-hysteria2 steer-proxy steer-xsteer steer-obfs; do
+			json_add_object
+			json_add_string name "$p"
+			json_add_string installed "$(pkg_version "$p")"
+			case "$needs" in *"\"$p\""*) json_add_boolean needed 1 ;; *) json_add_boolean needed 0 ;; esac
+			json_close_object
+		done
+		json_close_array
+		json_dump
+		;;
+	releases)
+		json_init
+		tmp=/tmp/steer-box-releases.json
+		json_add_array versions
+		if fetch "https://api.github.com/repos/$REPO/releases?per_page=10" "$tmp"; then
+			for t in $(jsonfilter -i "$tmp" -e '@[*].tag_name' 2>/dev/null); do
+				json_add_string "" "${t#v}"
+			done
+		fi
+		json_close_array
+		rm -f "$tmp"
+		json_dump
+		;;
+	install)
+		read -r input
+		ver=$(jsonfilter -s "$input" -e '@.version' 2>/dev/null)
+		pkgs=$(jsonfilter -s "$input" -e '@.packages[*]' 2>/dev/null)
+		json_init
+		case "$ver" in
+		''|*[!0-9.]*) json_add_boolean ok 0; json_add_string error "в версии допустимы только цифры и точки"; json_dump; exit 0 ;;
+		esac
+		if [ -z "$pkgs" ]; then
+			pkgs=$(/usr/bin/sing-box -c "$CONF" box-needs 2>/dev/null | jsonfilter -e '@[*]')
+			[ -n "$pkgs" ] || pkgs=steer-core
+		fi
+		arch=$(pkg_arch); ext=$(pkg_ext)
+		files=""
+		for p in $pkgs; do
+			case "$p" in steer-*) ;; *) continue ;; esac
+			f="/tmp/$p-$ver-1_$arch.$ext"
+			if ! fetch "https://github.com/$REPO/releases/download/v$ver/$p-$ver-1_$arch.$ext" "$f"; then
+				rm -f $files "$f"
+				json_add_boolean ok 0
+				json_add_string error "не скачалось: $p $ver для $arch"
+				json_dump; exit 0
+			fi
+			files="$files $f"
+		done
+		if [ "$ext" = apk ]; then
+			out=$(apk add --allow-untrusted $files 2>&1)
+		else
+			out=$(opkg install --force-reinstall $files 2>&1)
+		fi
+		rc=$?
+		rm -f $files
+		# Свой steerd у коннектора: служба steer без спеки ему мешает (те же таблицы).
+		if [ -x /etc/init.d/steer ] && [ ! -f /etc/steer/spec.json ] && [ ! -f /etc/steer/spec.yaml ]; then
+			/etc/init.d/steer stop >/dev/null 2>&1
+			/etc/init.d/steer disable >/dev/null 2>&1
+		fi
+		[ "$rc" = 0 ] && pgrep -f '^/usr/bin/sing-box ' >/dev/null 2>&1 && /etc/init.d/sing-box restart >/dev/null 2>&1
+		json_add_boolean ok "$([ "$rc" = 0 ] && echo 1 || echo 0)"
+		json_add_string output "$out"
+		json_dump
+		;;
+	esac
+	;;
+esac

@@ -1,0 +1,10 @@
+name: Вопрос
+description: Как что-то сделать или почему оно так устроено
+labels: [question]
+body:
+  - type: textarea
+    id: q
+    attributes:
+      label: Вопрос
+    validations:
+      required: true

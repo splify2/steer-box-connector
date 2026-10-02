@@ -1,0 +1,62 @@
+name: release
+
+# Выпуск — по тегу v<версия> (версия обязана совпасть с steer/VERSION) или вручную. Пакеты
+# коннектора под все архитектуры steer и тестовый набор с пакетами steer той же версии.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: Предварительный выпуск
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Версия
+        run: |
+          v="$(cat steer/VERSION)"
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          case "$GITHUB_REF" in
+            refs/tags/v*) [ "${GITHUB_REF#refs/tags/v}" = "$v" ] || {
+              echo "::error::тег ${GITHUB_REF#refs/tags/} не совпадает с steer/VERSION ($v)"; exit 1; } ;;
+          esac
+      - name: Сборка
+        run: |
+          sh build.sh --bundle 2>&1 | tee /tmp/build.log
+          if grep -q FAILED /tmp/build.log; then echo "::error::не все архитектуры собрались"; exit 1; fi
+      - name: Выпуск
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: steer-box-connector ${{ env.VERSION }}
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
+          files: |
+            out/*.apk
+            out/*.ipk
+            out/*.tar.gz
+          body: |
+            sing-box для podkop и forkop на движке steer ${{ env.VERSION }}.
+
+            **Проще всего — тестовый набор** `steer-box-connector-test-${{ env.VERSION }}.tar.gz`:
+            в нём пакеты коннектора и steer той же версии под все архитектуры и `install.sh`.
+
+            ```sh
+            tar -xzf steer-box-connector-test-${{ env.VERSION }}.tar.gz
+            cd steer-box-connector-test-${{ env.VERSION }} && sh install.sh
+            ```
+
+            Отдельные пакеты: `steer-box-connector-${{ env.VERSION }}-1_<арх>.apk` (OpenWrt на apk) и
+            `.ipk` (на opkg). Нужен `steer-core` той же версии из
+            [выпуска steer](https://github.com/splify2/steer/releases/tag/v${{ env.VERSION }}).
+            Архитектура — строка DISTRIB_ARCH в /etc/openwrt_release.

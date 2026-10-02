@@ -1,0 +1,4 @@
+#!/bin/sh
+[ -n "${IPKG_INSTROOT}" ] && exit 0
+[ -x /etc/init.d/sing-box ] && /etc/init.d/sing-box stop 2>/dev/null
+exit 0

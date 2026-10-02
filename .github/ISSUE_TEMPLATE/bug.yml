@@ -1,0 +1,38 @@
+name: Ошибка
+description: Что-то работает не так, как с обычным sing-box
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: Что случилось
+      description: Что делали, что ожидали и что получили.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: sing-box version
+      description: Вывод `sing-box version` на роутере (первые две строки).
+    validations:
+      required: true
+  - type: input
+    id: arch
+    attributes:
+      label: Архитектура и OpenWrt
+      description: Строки DISTRIB_ARCH и DISTRIB_RELEASE из /etc/openwrt_release.
+    validations:
+      required: true
+  - type: dropdown
+    id: front
+    attributes:
+      label: С чем работает коннектор
+      options: [forkop, podkop, другое]
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Журнал
+      description: "`logread -e sing-box | tail -200`. Ключи и адреса серверов уберите."
+      render: text

@@ -1,0 +1,14 @@
+# steer-box-connector — страница Services → Steer Connector.
+config steer-box 'main'
+	# Каким sing-box представляться в `sing-box version`: extended (forkop включает XHTTP и
+	# mtproxy) или stable; version — номер (podkop требует не ниже 1.12.4).
+	option variant 'extended'
+	option version '1.12.22'
+	# Поле метки своего экземпляра steer (биты подряд). Умолчание 0x000000ff — мимо меток podkop
+	# (0x00100000, 0x00200000), forkop (0x01000000–0x08000000) и zapret (0x20000000, 0x40000000).
+	option mark_mask '0x000000ff'
+	# Приоритет ip rule выходов steer; правило «метка tproxy соседа → main» встаёт на единицу
+	# ниже. Должен быть меньше, чем у podkop и forkop (105).
+	option rule_pref '100'
+	# Пусто — уровень журнала из конфига sing-box.
+	option log_level ''

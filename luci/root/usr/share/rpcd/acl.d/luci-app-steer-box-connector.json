@@ -1,0 +1,13 @@
+{
+	"luci-app-steer-box-connector": {
+		"description": "Steer Connector",
+		"read": {
+			"ubus": { "steer-box": [ "status", "releases" ] },
+			"uci": [ "steer-box" ]
+		},
+		"write": {
+			"ubus": { "steer-box": [ "install" ] },
+			"uci": [ "steer-box" ]
+		}
+	}
+}

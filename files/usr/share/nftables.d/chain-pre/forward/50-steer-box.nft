@@ -1,0 +1,5 @@
+# steer-box-connector: трафик клиентов в туннели steer (устройства sbx*, их заводит коннектор).
+# Без этого fw4 отвергает такой forward («reject with tcp reset»): устройства туннеля нет ни в
+# одной зоне, а зоны — настройка человека, и коннектор их не трогает. Обратный трафик пропускает
+# правило established самого fw4.
+oifname "sbx*" counter accept comment "steer-box-connector: туннели steer"
