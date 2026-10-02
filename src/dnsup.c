@@ -233,12 +233,9 @@ static long udp_exchange(const struct sockaddr_storage *a, socklen_t l, const st
         return -1;
     }
     uint16_t id = (uint16_t)((q[0] << 8) | q[1]);
-    long long until = (long long)time(NULL) * 1000 + timeout_ms;
+    long long until = now_ms() + timeout_ms;      /* оба конца — одни монотонные мс */
     for (;;) {
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        long long now = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-        int left = (int)(until - now);
+        int left = (int)(until - now_ms());
         if (left <= 0) break;
         struct pollfd pf = { fd, POLLIN, 0 };
         if (poll(&pf, 1, left) <= 0) break;
