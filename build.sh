@@ -102,7 +102,7 @@ pack_ipk() {  # АРХ ДЕРЕВО
     rm -rf "$2/CONTROL"
 }
 
-echo "$NAME $VERSION (steer $(git -C steer describe --tags --always 2>/dev/null || echo ?))"
+echo "$NAME $VERSION (steer $VERSION, коммит $(git -C steer rev-parse --short HEAD 2>/dev/null || echo ?))"
 for spec in $ISAS; do
     arch=${spec%%:*}
     printf '  %-26s ' "$arch"

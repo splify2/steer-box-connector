@@ -1,16 +1,18 @@
 name: release
 
-# Выпуск — по тегу v<версия> (версия обязана совпасть с steer/VERSION) или вручную. Пакеты
-# коннектора под все архитектуры steer и тестовый набор с пакетами steer той же версии.
+# Выпуск коннектора. Ядро steer берётся так:
+#   предварительный выпуск — последний коммит main steer (тег коннектора v<версия>-pre.<коммит steer>);
+#   выпуск                 — последний тег steer (тег коннектора — тот же, что у steer).
+# Версия коннектора всегда равна версии steer, с которым он собран: пакет требует steer-core той же
+# версии, и тестовый набор кладёт рядом пакеты steer из того же коммита.
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
-      prerelease:
-        description: Предварительный выпуск
-        type: boolean
-        default: true
+      channel:
+        description: Что собрать
+        type: choice
+        options: [prerelease, release]
+        default: prerelease
 
 permissions:
   contents: write
@@ -23,33 +25,51 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
-      - name: Версия
+      - name: Ядро steer
         run: |
+          git -C steer fetch --tags --force origin main
+          if [ "${{ inputs.channel }}" = release ]; then
+            ref="$(git -C steer tag -l 'v[0-9]*' --sort=-v:refname | grep -v -- '-' | head -1)"
+            [ -n "$ref" ] || { echo "::error::у steer нет ни одного тега выпуска"; exit 1; }
+          else
+            ref=origin/main
+          fi
+          git -C steer checkout -q "$ref"
+          [ -f steer/build/ext-build.sh ] || {
+            echo "::error::steer $ref ещё не умеет собирать внешние модули (нет build/ext-build.sh) — нужен выпуск steer 2.0.0 или новее"; exit 1; }
           v="$(cat steer/VERSION)"
-          echo "VERSION=$v" >> "$GITHUB_ENV"
-          case "$GITHUB_REF" in
-            refs/tags/v*) [ "${GITHUB_REF#refs/tags/v}" = "$v" ] || {
-              echo "::error::тег ${GITHUB_REF#refs/tags/} не совпадает с steer/VERSION ($v)"; exit 1; } ;;
-          esac
+          sha="$(git -C steer rev-parse --short HEAD)"
+          if [ "${{ inputs.channel }}" = release ]; then
+            tag="$ref"; pre=false; name="steer-box-connector $v"
+          else
+            tag="v$v-pre.$sha"; pre=true; name="steer-box-connector $v (предварительный, steer $sha)"
+          fi
+          {
+            echo "VERSION=$v"; echo "STEER_SHA=$sha"; echo "STEER_REF=$ref"
+            echo "TAG=$tag"; echo "PRE=$pre"; echo "NAME=$name"
+          } >> "$GITHUB_ENV"
+          echo "steer: $ref ($sha), версия $v, тег коннектора $tag"
       - name: Сборка
         run: |
           sh build.sh --bundle 2>&1 | tee /tmp/build.log
           if grep -q FAILED /tmp/build.log; then echo "::error::не все архитектуры собрались"; exit 1; fi
+          ls out/*.tar.gz >/dev/null || { echo "::error::тестовый набор не собрался"; exit 1; }
       - name: Выпуск
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ env.VERSION }}
-          name: steer-box-connector ${{ env.VERSION }}
-          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ env.NAME }}
+          prerelease: ${{ env.PRE }}
           files: |
             out/*.apk
             out/*.ipk
             out/*.tar.gz
           body: |
-            sing-box для podkop и forkop на ядре steer ${{ env.VERSION }}.
+            sing-box для podkop и forkop на ядре steer ${{ env.VERSION }} (steer `${{ env.STEER_REF }}`, коммит `${{ env.STEER_SHA }}`).
 
             **Проще всего — тестовый набор** `steer-box-connector-test-${{ env.VERSION }}.tar.gz`:
-            в нём пакеты коннектора и steer той же версии под все архитектуры и `install.sh`.
+            в нём пакеты коннектора и ядра steer из того же коммита под все архитектуры и `install.sh`.
 
             ```sh
             tar -xzf steer-box-connector-test-${{ env.VERSION }}.tar.gz
@@ -57,6 +77,5 @@ jobs:
             ```
 
             Отдельные пакеты: `steer-box-connector-${{ env.VERSION }}-1_<арх>.apk` (OpenWrt на apk) и
-            `.ipk` (на opkg). Нужен `steer-core` той же версии из
-            [выпуска steer](https://github.com/splify2/steer/releases/tag/v${{ env.VERSION }}).
-            Архитектура — строка DISTRIB_ARCH в /etc/openwrt_release.
+            `.ipk` (на opkg); нужен `steer-core` той же сборки — он в наборе. Архитектура — строка
+            DISTRIB_ARCH в /etc/openwrt_release. Документация — https://splify2.github.io/docs/connector/
