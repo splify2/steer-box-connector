@@ -129,7 +129,11 @@ static void reply(struct qctx *c, const uint8_t *r, size_t n) {
         sendto(c->l->fd, out, n, 0, (struct sockaddr *)&c->peer, c->peerlen);
     } else if (!c->tc->closed) {
         uint8_t len[2] = { (uint8_t)(n >> 8), (uint8_t)n };
-        if (write_all(c->tc->fd, len, 2) || write_all(c->tc->fd, out, n)) c->tc->closed = 1;
+        if (write_all(c->tc->fd, len, 2) || write_all(c->tc->fd, out, n)) {
+            /* Соединение мертво: из цикла его — сейчас, дескриптор закроет последняя ссылка. */
+            c->tc->closed = 1;
+            ev_del(c->s->rt->ev, c->tc->fd);
+        }
     }
     free(out);
 done:
@@ -682,18 +686,19 @@ static void udp_cb(struct ev *ev, int fd, uint32_t e, void *arg) {
 
 static void tcpc_cb(struct ev *ev, int fd, uint32_t e, void *arg) {
     struct tcpconn *c = arg;
-    for (;;) {
+    /* Своя ссылка на время разбора: ответ, ушедший сразу (reject, кэш), при ошибке записи
+     * закрывает соединение, и без неё оно освобождалось бы посреди этого цикла. */
+    c->refs++;
+    while (!c->closed) {
         ssize_t r = read(fd, c->buf + c->n, sizeof c->buf - c->n);
         if (r <= 0) {
             if (r < 0 && errno == EAGAIN) break;
             ev_del(ev, fd);
             c->closed = 1;
-            c->refs++;
-            tc_unref(c);
-            return;
+            break;
         }
         c->n += (size_t)r;
-        while (c->n >= 2) {
+        while (c->n >= 2 && !c->closed) {
             size_t ml = (size_t)(c->buf[0] << 8 | c->buf[1]);
             if (c->n < 2 + ml) break;
             if (ml >= 12) handle_query(c->l, c, c->buf + 2, ml, &c->peer, sizeof c->peer);
@@ -703,11 +708,9 @@ static void tcpc_cb(struct ev *ev, int fd, uint32_t e, void *arg) {
         if (c->n == sizeof c->buf) {
             ev_del(ev, fd);
             c->closed = 1;
-            c->refs++;
-            tc_unref(c);
-            return;
         }
     }
+    tc_unref(c);
     (void)e;
 }
 
