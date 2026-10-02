@@ -3,14 +3,14 @@
 #
 #   status    что показывает sing-box (вариант, версия), служба, steer-core и модули: стоит ли,
 #             какая версия, нужен ли текущему конфигу (sing-box box-needs);
-#   releases  версии steer на GitHub (xyzmean/steer);
+#   releases  версии steer на GitHub (splify2/steer);
 #   install   поставить выбранной версии steer-core и модули (по умолчанию — те, что нужны).
 #
 # Пакеты ставятся с релизов steer, как у splify2: их нет в feeds OpenWrt.
 
 . /usr/share/libubox/jshn.sh
 
-REPO=xyzmean/steer
+REPO=splify2/steer
 CONF=$(uci -q get sing-box.main.conffile)
 [ -n "$CONF" ] || CONF=/etc/sing-box/config.json
 
