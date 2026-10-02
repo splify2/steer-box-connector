@@ -1117,11 +1117,15 @@ static void route_req(struct hc *c, const char *body) {
 static void parse_and_route(struct hc *c) {
     char *hdr_end = strstr(c->in, "\r\n\r\n");
     if (!hdr_end) return;
-    *hdr_end = 0;
-    char *line = c->in, *save;
-    char *first = strtok_r(line, "\r\n", &save);
+    /* Заголовки режутся strtok_r в копии: тело может прийти позже, и тогда весь запрос
+     * разбирается заново из c->in — нули первого прохода в нём оборвали бы поиск конца
+     * заголовков, и запрос ждал бы до предела буфера. */
+    char *hdr = strndup(c->in, (size_t)(hdr_end - c->in));
+    if (!hdr) { hc_close(c); return; }
+    char *save;
+    char *first = strtok_r(hdr, "\r\n", &save);
     char target[2048] = "";
-    if (!first || sscanf(first, "%15s %2047s", c->method, target) != 2) { send_msg(c, 400, "bad request"); hc_close(c); return; }
+    if (!first || sscanf(first, "%15s %2047s", c->method, target) != 2) { free(hdr); send_msg(c, 400, "bad request"); hc_close(c); return; }
     char *q = strchr(target, '?');
     if (q) { *q = 0; snprintf(c->query, sizeof c->query, "%s", q + 1); }
     snprintf(c->path, sizeof c->path, "%s", target);
@@ -1137,13 +1141,9 @@ static void parse_and_route(struct hc *c) {
         else if (!strcasecmp(h, "Origin")) snprintf(c->origin, sizeof c->origin, "%s", v);
         else if (!strcasecmp(h, "Content-Length")) c->clen = (size_t)atol(v);
     }
+    free(hdr);
     c->body_off = (size_t)(hdr_end + 4 - c->in);
-    if (c->in_n - c->body_off < c->clen) {
-        /* Тело ещё не пришло: вернуть заголовки на место не нужно — ждём остаток и разбираем
-         * заново целиком. */
-        *hdr_end = '\r';
-        return;
-    }
+    if (c->in_n - c->body_off < c->clen) return;      /* тело ещё не пришло — ждём остаток */
     char *body = c->in + c->body_off;
     body[c->clen] = 0;
     route_req(c, c->clen ? body : NULL);
