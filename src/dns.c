@@ -45,6 +45,7 @@ struct tcpconn {
     size_t n;
     int refs;                   /* вопросы в пути: соединение закрывается после них */
     int closed;
+    struct tcpconn *next, **pprev;   /* в списке соединений сервера (dns_stop их закрывает) */
 };
 
 struct upent { char tag[128]; struct dnsup *u; int fakeip; };
@@ -74,7 +75,20 @@ struct dns_srv {
     size_t cbuckets, cn, ccap;
     struct listener *internal;
     uint16_t internal_port;
+    /* ОСТАНОВ ПРИ ВОПРОСАХ В ПУТИ. dns_stop (перечитывание конфига) закрывает слушатели, а ответы
+     * серверов на уже заданные вопросы приходят и после него. Поэтому сама структура (слушатели,
+     * на которые ссылаются вопросы и соединения) живёт, пока жив хоть один вопрос или
+     * соединение TCP (refs), а dead запрещает слать в закрытые дескрипторы и трогать кэш. */
+    int dead;
+    size_t refs;
+    struct tcpconn *tcs;
 };
+
+static void srv_put(struct dns_srv *s) {
+    if (--s->refs || !s->dead) return;
+    free(s->ls);
+    free(s);
+}
 
 struct qctx {
     struct dns_srv *s;
@@ -107,12 +121,16 @@ static struct dnsup *g_res_up;
 
 static void tc_unref(struct tcpconn *c) {
     if (--c->refs > 0 || !c->closed) return;
+    struct dns_srv *s = c->l->s;
     close(c->fd);
+    if ((*c->pprev = c->next)) c->next->pprev = c->pprev;
     free(c);
+    srv_put(s);
 }
 
 static void reply(struct qctx *c, const uint8_t *r, size_t n) {
-    if (!r || n < 12) goto done;
+    struct dns_srv *s = c->s;
+    if (!r || n < 12 || (s->dead && !c->tc)) goto done;
     uint8_t *out = malloc(n);
     if (!out) goto done;
     memcpy(out, r, n);
@@ -140,6 +158,7 @@ done:
     if (c->tc) tc_unref(c->tc);
     free(c->q);
     free(c);
+    srv_put(s);
 }
 
 static void reply_rcode(struct qctx *c, int rcode) {
@@ -652,6 +671,7 @@ static void handle_query(struct listener *l, struct tcpconn *tc, const uint8_t *
     c->strategy = -1;
     c->q = malloc(n);
     if (!c->q) { if (tc) tc_unref(tc); free(c); return; }
+    l->s->refs++;
     memcpy(c->q, buf, n);
     c->qn = n;
     if (dnsq_parse(buf, n, &c->dq)) {
@@ -714,6 +734,15 @@ static void tcpc_cb(struct ev *ev, int fd, uint32_t e, void *arg) {
     (void)e;
 }
 
+/* Соединение — в список сервера: dns_stop закроет его, а сервер живёт, пока оно живо. */
+static void tc_track(struct listener *l, struct tcpconn *c) {
+    c->l = l;
+    if ((c->next = l->s->tcs)) c->next->pprev = &c->next;
+    c->pprev = &l->s->tcs;
+    l->s->tcs = c;
+    l->s->refs++;
+}
+
 static void tcpl_cb(struct ev *ev, int fd, uint32_t e, void *arg) {
     (void)e;
     struct listener *l = arg;
@@ -725,8 +754,8 @@ static void tcpl_cb(struct ev *ev, int fd, uint32_t e, void *arg) {
         struct tcpconn *c = calloc(1, sizeof *c);
         if (!c) { close(cfd); continue; }
         c->fd = cfd;
-        c->l = l;
         c->peer = peer;
+        tc_track(l, c);
         ev_add(ev, cfd, EPOLLIN, tcpc_cb, c);
     }
 }
@@ -893,20 +922,36 @@ void dns_stop(struct box_rt *rt) {
         ev_del(rt->ev, s->ls[i].fd);
         close(s->ls[i].fd);
     }
-    free(s->ls);
+    s->dead = 1;
+    s->refs++;                  /* свой, до конца останова */
     if (s->dnsd_retry) ev_timer_cancel(rt->ev, s->dnsd_retry);
     if (s->dnsd_fd >= 0) { ev_del(rt->ev, s->dnsd_fd); close(s->dnsd_fd); }
-    /* Вопросы, ждавшие dnsd, — SERVFAIL: их соединения ещё открыты. Слушатели уже закрыты,
-     * поэтому ответ по UDP уйдёт в закрытый сокет — это тот же исход, что потеря датаграммы. */
+    /* Вопросы, ждавшие dnsd, — без ответа (слушатели закрыты): клиент переспросит новый вход. */
     for (size_t i = 0; i < 65536; i++)
-        if (s->dnsd_wait[i]) { free(s->dnsd_wait[i]->q); free(s->dnsd_wait[i]); }
+        if (s->dnsd_wait[i]) { struct qctx *c = s->dnsd_wait[i]; s->dnsd_wait[i] = NULL; reply(c, NULL, 0); }
+    /* Соединения TCP — закрыть; вопросы в пути отпустят их сами. */
+    while (s->tcs) {
+        struct tcpconn *c = s->tcs;
+        s->tcs = c->next;
+        if (c->next) c->next->pprev = &s->tcs;
+        c->next = NULL;
+        c->pprev = &c->next;
+        ev_del(rt->ev, c->fd);
+        c->closed = 1;
+        c->refs++;
+        tc_unref(c);
+    }
     for (size_t i = 0; i < s->nups; i++) if (s->ups[i].u) dnsup_unref(s->ups[i].u);
     free(s->ups);
+    s->ups = NULL;
+    s->nups = 0;
     for (size_t i = 0; i < s->cbuckets; i++)
         for (struct centry *e = s->ctab[i], *n; e; e = n) { n = e->next; free(e->resp); free(e); }
     free(s->ctab);
-    free(s);
+    s->ctab = NULL;
+    s->cache_off = 1;
     rt->dns = NULL;
+    srv_put(s);
 }
 
 /* ---- свои соединения коннектора --------------------------------------------------------- */

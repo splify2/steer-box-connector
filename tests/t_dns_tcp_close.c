@@ -16,7 +16,7 @@ static const char CFG[] =
 static struct tcpconn *conn(struct box_rt *rt, int fd) {
     struct tcpconn *c = calloc(1, sizeof *c);
     c->fd = fd;
-    c->l = listener_of(rt, "dns-in", 0);
+    tc_track(listener_of(rt, "dns-in", 0), c);       /* как tcpl_cb */
     fcntl(fd, F_SETFL, O_NONBLOCK);
     ev_add(rt->ev, fd, EPOLLIN, tcpc_cb, c);
     return c;
