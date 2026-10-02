@@ -770,15 +770,14 @@ static void sig_cb(struct ev *ev, int fd, uint32_t e, void *arg) {
         if (si.ssi_signo == SIGHUP) {
             rt_reload(rt, "SIGHUP");
         } else if (si.ssi_signo == SIGCHLD) {
+            /* Только steerd: прочих детей (apply --dry-run, conntrack, ip) ждут те, кто их
+             * запустил, в том числе рабочие потоки, — waitpid(-1) отнимал бы у них код выхода. */
             int st;
-            pid_t p;
-            while ((p = waitpid(-1, &st, WNOHANG)) > 0) {
-                if (p == rt->steerd) {
-                    LOGE("steerd завершился (%s %d) — выхожу, procd поднимет заново",
-                         WIFEXITED(st) ? "код" : "сигнал", WIFEXITED(st) ? WEXITSTATUS(st) : WTERMSIG(st));
-                    rt->steerd = 0;
-                    ev_stop(ev);
-                }
+            if (rt->steerd > 0 && waitpid(rt->steerd, &st, WNOHANG) == rt->steerd) {
+                LOGE("steerd завершился (%s %d) — выхожу, procd поднимет заново",
+                     WIFEXITED(st) ? "код" : "сигнал", WIFEXITED(st) ? WEXITSTATUS(st) : WTERMSIG(st));
+                rt->steerd = 0;
+                ev_stop(ev);
             }
         } else {
             LOGI("сигнал %u — останавливаюсь", si.ssi_signo);
