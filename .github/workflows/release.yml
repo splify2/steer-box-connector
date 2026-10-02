@@ -54,18 +54,11 @@ jobs:
           sh build.sh --bundle 2>&1 | tee /tmp/build.log
           if grep -q FAILED /tmp/build.log; then echo "::error::не все архитектуры собрались"; exit 1; fi
           ls out/*.tar.gz >/dev/null || { echo "::error::тестовый набор не собрался"; exit 1; }
-      - name: Выпуск
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.TAG }}
-          target_commitish: ${{ github.sha }}
-          name: ${{ env.NAME }}
-          prerelease: ${{ env.PRE }}
-          files: |
-            out/*.apk
-            out/*.ipk
-            out/*.tar.gz
-          body: |
+      - name: Текст выпуска
+        # Один текст на два выпуска: этот файл идёт и в выпуск здесь, и в splify2/releases
+        # (последний шаг). Выражения раскрываются в env, оболочка пишет его как есть.
+        env:
+          NOTES: |
             sing-box для podkop и forkop на ядре steer ${{ env.VERSION }} (steer `${{ env.STEER_REF }}`, коммит `${{ env.STEER_SHA }}`).
 
             **Проще всего — тестовый набор** `steer-box-connector-test-${{ env.VERSION }}.tar.gz`:
@@ -79,3 +72,58 @@ jobs:
             Отдельные пакеты: `steer-box-connector-${{ env.VERSION }}-1_<арх>.apk` (OpenWrt на apk) и
             `.ipk` (на opkg); нужен `steer-core` той же сборки — он в наборе. Архитектура — строка
             DISTRIB_ARCH в /etc/openwrt_release. Документация — https://splify2.github.io/docs/connector/
+        run: printf '%s' "$NOTES" > "$RUNNER_TEMP/release-notes.md"
+      - name: Выпуск
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ env.NAME }}
+          prerelease: ${{ env.PRE }}
+          files: |
+            out/*.apk
+            out/*.ipk
+            out/*.tar.gz
+          body_path: ${{ runner.temp }}/release-notes.md
+      # splify2/releases — version.json, списки изменений и копии пакетов всех проектов: по нему
+      # установщик, роутер и сайт узнают о выпуске. Шаги последние: выпуск здесь к этому времени
+      # уже вышел. Без секрета RELEASES_TOKEN (токен с правом записи в splify2/releases) они
+      # пропускаются с предупреждением и выпуск не роняют.
+      - name: Доступ к splify2/releases
+        id: releases
+        env:
+          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          if [ -n "$RELEASES_TOKEN" ]; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::нет секрета RELEASES_TOKEN — выпуск не опубликован в splify2/releases"
+          fi
+      - name: Клон splify2/releases
+        if: steps.releases.outputs.ok == '1'
+        uses: actions/checkout@v4
+        with:
+          repository: splify2/releases
+          token: ${{ secrets.RELEASES_TOKEN }}
+          path: splify2-releases
+      - name: Опубликовать в splify2/releases
+        if: steps.releases.outputs.ok == '1'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          set -eu
+          # Ровно те файлы, что ушли в выпуск выше, и тот же текст. Версия — из тега: у
+          # предварительного она с коммитом steer (2.0.0-pre.<коммит>), у выпуска — версия steer.
+          assets="$RUNNER_TEMP/release-assets"
+          rm -rf "$assets"
+          mkdir -p "$assets"
+          cp out/*.apk out/*.ipk out/*.tar.gz "$assets/"
+          channel=stable
+          [ "$PRE" = true ] && channel=prerelease
+          cd splify2-releases
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          python3 scripts/publish.py --product steer-box-connector --version "${TAG#v}" \
+            --channel "$channel" --source-tag "$TAG" --changelog "$RUNNER_TEMP/release-notes.md" \
+            --assets "$assets" \
+            --mirror "https://github.com/splify2/steer-box-connector/releases/download/$TAG"
