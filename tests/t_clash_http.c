@@ -1,13 +1,16 @@
-/* Clash API (clash.c), разбор запроса.
+/* Clash API (clash.c), разбор запроса и ожидание ответа.
  *
- * Тело, пришедшее отдельным сегментом после заголовков (PUT /proxies/<g> из браузера), —
+ * 1. Тело, пришедшее отдельным сегментом после заголовков (PUT /proxies/<g> из браузера), —
  *    запрос всё равно разбирается: strtok_r первого прохода раньше резал заголовки нулями в
  *    самом буфере, и второй проход не находил «\r\n\r\n» — запрос висел до 4 МиБ.
- */
+ * 2. Соединение, чей ответ ждёт рабочего потока (замер задержки до timeout из запроса, смена
+ *    выбора), а клиент уже закрыл своё, — не крутит цикл: hc_read на каждом EPOLLIN
+ *    возвращался, ничего не прочитав, и epoll звал его снова (100% ЦП на время замера). */
 // deps: src/json.c src/evloop.c src/net.c src/sbconf.c tests/stub_log.c
 #include "../src/clash.c"
 #include "check.h"
 #include <signal.h>
+#include <sys/resource.h>
 
 struct box_rt *g_rt;
 static struct box_rt g_box;
@@ -32,6 +35,13 @@ static void run_ms(long ms) {
     h->stop = 0;
 }
 
+static long cpu_ms(void) {
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    return (ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1000L +
+           (ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) / 1000L;
+}
+
 static void t_split_body(void) {
     int sv[2];
     socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
@@ -48,6 +58,23 @@ static void t_split_body(void) {
     close(sv[1]);
 }
 
+static void t_wait_no_spin(void) {
+    int sv[2];
+    socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    struct hc *c = conn(sv[0]);
+    c->st = HS_WAIT;            /* ответ — за рабочим потоком */
+    c->refs++;                  /* его ссылка */
+    close(sv[1]);               /* клиент ушёл */
+    long t0 = cpu_ms();
+    run_ms(400);
+    long spent = cpu_ms() - t0;
+    CHECK(spent < 150);
+    if (spent >= 150) fprintf(stderr, "ЦП за 400 мс ожидания: %ld мс\n", spent);
+    /* Работа закончилась: ответ некому, соединение закрывается. */
+    hc_close(c);
+    hc_unref(c);
+}
+
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
     g_rt = &g_box;
@@ -55,5 +82,6 @@ int main(void) {
     g_box.cfg = jnew(J_OBJ);
     g_cl.rt = &g_box;
     t_split_body();
+    t_wait_no_spin();
     return T_DONE();
 }

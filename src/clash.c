@@ -1153,7 +1153,13 @@ static void parse_and_route(struct hc *c) {
 static void hc_read(struct ev *ev, int fd, uint32_t e, void *arg) {
     (void)e;
     struct hc *c = arg;
-    if (c->st != HS_READ) return;
+    if (c->st != HS_READ) {
+        /* Ответ ждёт рабочего потока, а клиент что-то прислал или ушёл: читать нечего, и без
+         * снятия с цикла epoll звал бы сюда снова и снова (EPOLLIN по уровню). Закроет
+         * соединение тот, кто ответит (hc_close). */
+        ev_del(ev, fd);
+        return;
+    }
     if (c->in_n + 4096 + 1 > c->in_cap) {
         size_t nc = c->in_cap ? c->in_cap * 2 : 8192;
         if (nc > (4u << 20)) { send_msg(c, 400, "too large"); hc_close(c); return; }
