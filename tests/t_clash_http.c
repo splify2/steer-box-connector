@@ -18,9 +18,8 @@ static struct clash g_cl;
 
 static struct hc *conn(int fd) {
     struct hc *c = calloc(1, sizeof *c);
-    c->cl = &g_cl;
     c->fd = fd;
-    c->refs = 1;
+    hc_track(&g_cl, c);              /* как accept_cb */
     set_nonblock(fd, 1);
     ev_add(g_box.ev, fd, EPOLLIN, hc_read, c);
     return c;
@@ -81,6 +80,7 @@ int main(void) {
     g_box.ev = ev_new();
     g_box.cfg = jnew(J_OBJ);
     g_cl.rt = &g_box;
+    g_cl.refs = 1;                   /* как clash_start: ссылка таймера */
     t_split_body();
     t_wait_no_spin();
     return T_DONE();

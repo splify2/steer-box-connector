@@ -40,7 +40,13 @@ struct clash {
     unsigned long long last_up, last_down;   /* для /traffic: прошлые суммы */
     long long last_at;
     int stopped;                 /* clash_stop: таймер ws_tick отпустит структуру сам */
+    struct hc *all;              /* все соединения — clash_stop закрывает их */
+    int refs;                    /* таймер ws_tick и каждое соединение */
 };
+
+static void cl_put(struct clash *cl) {
+    if (--cl->refs == 0) free(cl);
+}
 
 enum hstate { HS_READ, HS_WAIT, HS_WS, HS_DONE };
 
@@ -57,6 +63,7 @@ struct hc {
     int wskind;                  /* 1 traffic, 2 connections, 3 memory, 4 logs */
     int refs;
     struct hc *next;
+    struct hc *anext, **apprev;  /* в cl->all */
 };
 
 static void hc_close(struct hc *c);
@@ -265,8 +272,11 @@ static struct jval *proxies_all(struct box_rt *rt) {
 static void hc_unref(struct hc *c) {
     if (--c->refs > 0) return;
     if (c->fd >= 0) close(c->fd);
+    struct clash *cl = c->cl;
+    if ((*c->apprev = c->anext)) c->anext->apprev = c->apprev;
     free(c->in);
     free(c);
+    cl_put(cl);
 }
 
 /* Замер задержки одного выхода — в рабочем потоке. */
@@ -855,7 +865,7 @@ static void traffic_now(struct box_rt *rt, unsigned long long *up, unsigned long
 
 static void ws_tick(struct ev *ev, void *arg) {
     struct clash *cl = arg;
-    if (cl->stopped) { free(cl); return; }
+    if (cl->stopped) { cl_put(cl); return; }
     unsigned long long up, down;
     traffic_now(cl->rt, &up, &down);
     long long now = ev_now_ms();
@@ -1191,6 +1201,16 @@ static void hc_close(struct hc *c) {
     hc_unref(c);
 }
 
+/* Новое соединение: своя ссылка и место в cl->all. */
+static void hc_track(struct clash *cl, struct hc *c) {
+    c->cl = cl;
+    c->refs = 1;
+    if ((c->anext = cl->all)) c->anext->apprev = &c->anext;
+    c->apprev = &cl->all;
+    cl->all = c;
+    cl->refs++;
+}
+
 static void accept_cb(struct ev *ev, int fd, uint32_t e, void *arg) {
     (void)e;
     struct clash *cl = arg;
@@ -1199,9 +1219,8 @@ static void accept_cb(struct ev *ev, int fd, uint32_t e, void *arg) {
         if (cfd < 0) return;
         struct hc *c = calloc(1, sizeof *c);
         if (!c) { close(cfd); continue; }
-        c->cl = cl;
         c->fd = cfd;
-        c->refs = 1;
+        hc_track(cl, c);
         ev_add(ev, cfd, EPOLLIN, hc_read, c);
     }
 }
@@ -1213,6 +1232,7 @@ int clash_start(struct box_rt *rt) {
     struct clash *cl = calloc(1, sizeof *cl);
     if (!cl) return -1;
     cl->rt = rt;
+    cl->refs = 1;                /* таймер ws_tick */
     snprintf(cl->secret, sizeof cl->secret, "%s", jgets(api, "secret") ? jgets(api, "secret") : "");
     const char *ui = jgets(api, "external_ui");
     if (ui && *ui) {
@@ -1236,9 +1256,17 @@ void clash_stop(struct box_rt *rt) {
     if (!cl) return;
     ev_del(rt->ev, cl->lfd);
     close(cl->lfd);
-    for (struct hc *c = cl->ws, *n; c; c = n) { n = c->next; if (c->fd >= 0) { ev_del(rt->ev, c->fd); close(c->fd); c->fd = -1; } }
+    /* Все соединения — закрыть: ждущие ответа рабочего потока увидят fd < 0 и только отпустят
+     * свою ссылку; структура живёт, пока жива последняя (cl->refs). */
+    cl->refs++;
+    for (struct hc *c = cl->all, *n; c; c = n) {
+        n = c->anext;               /* hc_close освобождает разве что c */
+        hc_close(c);
+    }
+    for (struct hc *c = cl->ws, *n; c; c = n) { n = c->next; hc_unref(c); }   /* ссылки списка */
     cl->ws = NULL;
     /* Таймер ws_tick держит cl: структуру отпустит он, на ближайшем срабатывании. */
     cl->stopped = 1;
     rt->clash = NULL;
+    cl_put(cl);
 }
