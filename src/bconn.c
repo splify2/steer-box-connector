@@ -215,7 +215,9 @@ int http_request(struct bconn *c, const char *method, const char *host, const ch
                 while (bconn_read_line(c, line, sizeof line, timeout_ms) > 0) {}
                 break;
             }
-            if (r->body_n + k > max_body) { snprintf(err, errn, "тело больше %zu байт", max_body); return -1; }
+            /* Размер куска — число сервера: сравнение без суммы, иначе кусок около 2^64
+             * переполнял бы её и проходил проверку (тело всегда не больше max_body). */
+            if (k > max_body - r->body_n) { snprintf(err, errn, "тело больше %zu байт", max_body); return -1; }
             if (r->body_n + k + 1 > cap) {
                 cap = (r->body_n + k + 1) * 2;
                 unsigned char *nb = realloc(r->body, cap);
@@ -342,7 +344,7 @@ int http_get(const char *url, const struct egress *eg, int timeout_ms, size_t ma
                 if (bconn_read_line(&c, line, sizeof line, timeout_ms) < 0) { bad = 1; break; }
                 size_t k = (size_t)strtoul(line, NULL, 16);
                 if (!k) break;
-                if (n + k > max_body) { bad = 2; break; }
+                if (k > max_body - n) { bad = 2; break; }   /* без суммы: см. http_request */
                 if (n + k + 1 > cap) {
                     cap = (n + k + 1) * 2;
                     unsigned char *nb = realloc(body, cap);
