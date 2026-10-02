@@ -3,14 +3,25 @@
 #
 #   status    что показывает sing-box (вариант, версия), служба, steer-core и модули: стоит ли,
 #             какая версия, нужен ли текущему конфигу (sing-box box-needs);
-#   releases  версии steer на GitHub (splify2/steer);
+#   releases  версии steer: из перечня выпусков splify2/releases (version.json), а если он не
+#             ответил — из выпусков GitHub (splify2/steer);
 #   install   поставить выбранной версии steer-core и модули (по умолчанию — те, что нужны).
 #
-# Пакеты ставятся с релизов steer, как у splify2: их нет в feeds OpenWrt.
+# Пакеты ставятся с выпусков steer, как у splify2: их нет в feeds OpenWrt. Адреса и sha256 файлов —
+# из перечня выпусков, затем прежняя ссылка выпуска steer.
 
-. /usr/share/libubox/jshn.sh
+# Швы для стенда (tests/releases.sh): на роутере rpcd запускает объект с чистым окружением, и
+# берутся системные пути.
+. "${JSHN_SH:-/usr/share/libubox/jshn.sh}"
+OPENWRT_RELEASE=${OPENWRT_RELEASE:-/etc/openwrt_release}
 
 REPO=splify2/steer
+# Перечень выпусков splify2/releases — три адреса одного version.json, по порядку. Он ПЕРВЫЙ
+# источник версий и адресов файлов; api.github.com и прямая ссылка выпуска — запасной путь.
+REL_URLS="https://raw.githubusercontent.com/splify2/releases/main/version.json https://cdn.jsdelivr.net/gh/splify2/releases@main/version.json https://splify2.github.io/releases/version.json"
+REL=/tmp/steer-box-version.json
+# Продукт steer в перечне.
+RP="@.products['steer'].versions"
 CONF=$(uci -q get sing-box.main.conffile)
 [ -n "$CONF" ] || CONF=/etc/sing-box/config.json
 
@@ -20,7 +31,7 @@ pkg_arch() {
 	# Архитектура пакетов OpenWrt (aarch64_cortex-a53), а не машины: `apk --print-arch` на 25.12
 	# отвечает aarch64, а пакеты steer названы по DISTRIB_ARCH.
 	local DISTRIB_ARCH=""
-	[ -f /etc/openwrt_release ] && . /etc/openwrt_release
+	[ -f "$OPENWRT_RELEASE" ] && . "$OPENWRT_RELEASE"
 	if [ -n "$DISTRIB_ARCH" ]; then
 		echo "$DISTRIB_ARCH"
 	elif command -v apk >/dev/null 2>&1; then
@@ -39,12 +50,80 @@ pkg_version() {
 	fi
 }
 
-fetch() {  # URL ФАЙЛ
+fetch() {  # URL ФАЙЛ [СЕКУНД]
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL -m 120 -o "$2" "$1"
+		curl -fsSL -m "${3:-120}" -o "$2" "$1"
 	else
-		wget -q -T 120 -O "$2" "$1"
+		wget -q -T "${3:-120}" -O "$2" "$1"
 	fi
+}
+
+# version.json — с первого ответившего адреса, если его схема та, под которую написан разбор.
+# Срок на адрес — 20 секунд, а не 120, как у пакетов: файл в десятки килобайт, а там, где адрес
+# закрыт молча, три адреса по две минуты держали бы страницу шесть минут до запасного пути.
+rel_load() {
+	rm -f "$REL"
+	for u in $REL_URLS; do
+		if fetch "$u" "$REL" 20 && [ "$(jsonfilter -i "$REL" -e '@.schema' 2>/dev/null)" = 1 ]; then
+			return 0
+		fi
+		rm -f "$REL"
+	done
+	return 1
+}
+
+# Индекс строки $2 в выводе jsonfilter по выражению $1 (с нуля); нет — код 1.
+rel_index() {  # ВЫРАЖЕНИЕ ЗНАЧЕНИЕ
+	_i=0
+	while IFS= read -r _x; do
+		[ "$_x" = "$2" ] && { echo "$_i"; return 0; }
+		_i=$((_i + 1))
+	done <<EOF
+$(jsonfilter -i "$REL" -e "$1" 2>/dev/null)
+EOF
+	return 1
+}
+
+# Файл выпуска по перечню: sha256 — в SUM, адреса по порядку — в URLS. Имя файла собирается как
+# прежде, и ищется по значению: имена 1.5.x (steer, steer-extended) и 2.0 (steer-core и модули)
+# лежат в перечне как есть. Адрес — только https, из безопасных знаков и с именем файла на конце.
+rel_asset() {  # ВЕРСИЯ ИМЯ_ФАЙЛА
+	SUM=""; URLS=""
+	[ -s "$REL" ] || return 1
+	vi=$(rel_index "$RP[*].version" "$1") || return 1
+	ai=$(rel_index "$RP[$vi].assets[*].name" "$2") || return 1
+	while IFS= read -r x; do
+		case "$x" in
+		https://*[!A-Za-z0-9._~:/%+@=-]*) ;;
+		https://?*/"$2") URLS="$URLS $x" ;;
+		*[!0-9a-f]*) ;;
+		*) [ "${#x}" = 64 ] && SUM="$x" ;;
+		esac
+	done <<EOF
+$(jsonfilter -i "$REL" -e "$RP[$vi].assets[$ai].sha256" -e "$RP[$vi].assets[$ai].urls[*]" 2>/dev/null)
+EOF
+}
+
+# Сверка с sha256 из перечня. Суммы нет или нет sha256sum — сверять нечем.
+sum_ok() {  # ФАЙЛ SHA256
+	[ -n "$2" ] || return 0
+	command -v sha256sum >/dev/null 2>&1 || return 0
+	[ "$(sha256sum "$1" 2>/dev/null | cut -d' ' -f1)" = "$2" ]
+}
+
+# Пакет: адреса из перечня по порядку (сумма не сошлась — следующий), затем прежняя ссылка выпуска
+# steer, если её не было среди них. Сумма сверяется у файла с любого адреса.
+pkg_fetch() {  # ВЕРСИЯ ИМЯ_ФАЙЛА ФАЙЛ
+	rel_asset "$1" "$2"
+	old="https://github.com/$REPO/releases/download/v$1/$2"
+	case " $URLS " in *" $old "*) ;; *) URLS="$URLS $old" ;; esac
+	for u in $URLS; do
+		if fetch "$u" "$3" && sum_ok "$3" "$SUM"; then
+			return 0
+		fi
+		rm -f "$3"
+	done
+	return 1
 }
 
 case "$1" in
@@ -82,12 +161,28 @@ call)
 		json_init
 		tmp=/tmp/steer-box-releases.json
 		json_add_array versions
-		if fetch "https://api.github.com/repos/$REPO/releases?per_page=10" "$tmp"; then
+		n=0; pre=""; listed=" "
+		# Перечень выпусков: versions[] по порядку (до десяти стабильных и текущая предварительная),
+		# только цифры и точки — то, что примет install; предварительная — по полю prerelease.
+		if rel_load; then
+			for v in $(jsonfilter -i "$REL" -e "$RP[*].version" 2>/dev/null); do
+				case "$v" in ''|*[!0-9.]*) continue ;; esac
+				json_add_string "" "$v"
+				listed="$listed$v "
+				n=$((n + 1))
+			done
+			[ "$n" = 0 ] || pre=$(jsonfilter -i "$REL" -e "@.products['steer'].prerelease" 2>/dev/null)
+			case "$listed" in *" $pre "*) ;; *) pre="" ;; esac
+			rm -f "$REL"
+		fi
+		# Перечень не ответил или steer в нём нет — выпуски GitHub, как прежде.
+		if [ "$n" = 0 ] && fetch "https://api.github.com/repos/$REPO/releases?per_page=10" "$tmp"; then
 			for t in $(jsonfilter -i "$tmp" -e '@[*].tag_name' 2>/dev/null); do
 				json_add_string "" "${t#v}"
 			done
 		fi
 		json_close_array
+		case "$pre" in ''|*[!0-9.]*) ;; *) json_add_string prerelease "$pre" ;; esac
 		rm -f "$tmp"
 		json_dump
 		;;
@@ -105,17 +200,21 @@ call)
 		fi
 		arch=$(pkg_arch); ext=$(pkg_ext)
 		files=""
+		rel_load
 		for p in $pkgs; do
 			case "$p" in steer-*) ;; *) continue ;; esac
+			# Имя идёт в путь файла в /tmp и в адрес: только знаки имён пакетов, без «/» и «..».
+			case "$p" in *[!a-z0-9-]*) continue ;; esac
 			f="/tmp/$p-$ver-1_$arch.$ext"
-			if ! fetch "https://github.com/$REPO/releases/download/v$ver/$p-$ver-1_$arch.$ext" "$f"; then
-				rm -f $files "$f"
+			if ! pkg_fetch "$ver" "$p-$ver-1_$arch.$ext" "$f"; then
+				rm -f $files "$f" "$REL"
 				json_add_boolean ok 0
 				json_add_string error "не скачалось: $p $ver для $arch"
 				json_dump; exit 0
 			fi
 			files="$files $f"
 		done
+		rm -f "$REL"
 		if [ "$ext" = apk ]; then
 			out=$(apk add --allow-untrusted $files 2>&1)
 		else

@@ -7,14 +7,22 @@
 #
 #   sh tests/run.sh            все проверки
 #   sh tests/run.sh t_json     одна (по имени файла без .c)
+#   sh tests/run.sh releases   стенд rpcd на shell (tests/releases.sh) — он идёт и в общем прогоне
 set -u
 cd "$(dirname "$0")/.."
+shfail=0
+if [ $# -eq 0 ] || case " $* " in *" releases "*) true ;; *) false ;; esac; then
+    if sh tests/releases.sh >build-releases.log 2>&1; then echo "ok   releases"
+    else echo "FAIL releases"; sed 's/^/    /' build-releases.log | grep -v '^    ok ' | head -40; shfail=1; fi
+    rm -f build-releases.log
+    [ "$*" = releases ] && exit $shfail
+fi
 [ -d steer/src ] || { echo "нет подмодуля steer — git submodule update --init" >&2; exit 1; }
 CC=${CC:-cc}
 INC="-Isrc $(find steer/src -type d | sed 's/^/-I/' | tr '\n' ' ')"
 OUT=build/tests
 mkdir -p "$OUT"
-fail=0
+fail=$shfail
 for t in tests/t_*.c; do
     n=$(basename "$t" .c)
     [ $# -gt 0 ] && { case " $* " in *" $n "*) ;; *) continue ;; esac; }

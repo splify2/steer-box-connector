@@ -58,8 +58,9 @@ function verGE(a, b) {
 function installBlock(st, rel) {
 	var min = st.steer_min || '0.0.0';
 	var versions = ((rel && rel.versions) || []).filter(function(v) { return verGE(v, min); });
+	var pre = (rel && rel.prerelease) || '';
 	var sel = E('select', { 'class': 'cbi-input-select' }, versions.map(function(v) {
-		return E('option', { 'value': v }, v);
+		return E('option', { 'value': v }, v === pre ? _('%s (предварительный)').format(v) : v);
 	}));
 	var onlyNeeded = E('input', { 'type': 'checkbox', 'checked': true });
 	var btn = E('button', {

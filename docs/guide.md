@@ -64,6 +64,14 @@ sing-box коннектором. Работающие forkop и podkop он на
 
 Проверено на OpenWrt 25.12 (apk) с podkop 0.7.22 и forkop 2.0.0. На opkg не проверялось.
 
+Со страницы **Services → Steer Connector** пакеты steer ставятся по сети. Версии берутся из
+перечня выпусков [splify2/releases](https://github.com/splify2/releases) — `version.json` с
+raw.githubusercontent.com, jsDelivr или splify2.github.io, по порядку; предварительная версия
+помечена в списке. Пакет качается по адресам из перечня (сначала выпуск в splify2/releases, потом
+выпуск steer) и сверяется с его `sha256`, если на роутере есть `sha256sum`: не сошлось — следующий
+адрес. Перечень не ответил или версии в нём нет — версии из выпусков GitHub `splify2/steer`, пакет
+по ссылке выпуска steer, как раньше.
+
 ## Сборка
 
 ```sh
