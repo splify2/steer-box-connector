@@ -41,11 +41,15 @@ struct clash {
     long long last_at;
     int stopped;                 /* clash_stop: таймер ws_tick отпустит структуру сам */
     struct hc *all;              /* все соединения — clash_stop закрывает их */
+    struct jval *origins;        /* access_control_allow_origin (копия); пусто — «*» */
+    int allow_pna;               /* access_control_allow_private_network */
     int refs;                    /* таймер ws_tick и каждое соединение */
 };
 
 static void cl_put(struct clash *cl) {
-    if (--cl->refs == 0) free(cl);
+    if (--cl->refs) return;
+    json_free(cl->origins);
+    free(cl);
 }
 
 enum hstate { HS_READ, HS_WAIT, HS_WS, HS_DONE };
@@ -127,17 +131,34 @@ static const char *reason(int code) {
     }
 }
 
+/* CORS — как у sing-box (go-chi/cors): без access_control_allow_origin — «*»; со списком —
+ * только origin из него (иначе заголовка нет); доступ из публичного сайта к частной сети —
+ * только при access_control_allow_private_network. */
+static const char *cors_origin(const struct hc *c) {
+    const struct jval *l = c->cl->origins;
+    if (!jlen(l)) return "*";
+    for (size_t i = 0; i < jlen(l); i++) {
+        const struct jval *e = jat(l, i);
+        if (e->t != J_STR) continue;
+        if (!strcmp(e->s, "*")) return "*";
+        if (c->origin[0] && !strcmp(e->s, c->origin)) return c->origin;
+    }
+    return NULL;
+}
+
 static void send_raw(struct hc *c, int code, const char *ctype, const char *body, size_t n) {
-    char head[1024];
+    char head[1024], acao[340] = "";
+    const char *ao = cors_origin(c);
+    if (ao) snprintf(acao, sizeof acao, "Access-Control-Allow-Origin: %s\r\n", ao);
     int hn = snprintf(head, sizeof head,
                       "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
-                      "Access-Control-Allow-Origin: %s\r\n"
+                      "%s"
                       "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
                       "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
-                      "Access-Control-Allow-Private-Network: true\r\n"
+                      "%s"
                       "Connection: close\r\n\r\n",
-                      code, reason(code), ctype ? ctype : "application/json", n,
-                      c->origin[0] ? c->origin : "*");
+                      code, reason(code), ctype ? ctype : "application/json", n, acao,
+                      c->cl->allow_pna ? "Access-Control-Allow-Private-Network: true\r\n" : "");
     set_nonblock(c->fd, 0);
     write_all(c->fd, head, (size_t)hn);
     if (n) write_all(c->fd, body, n);
@@ -1244,6 +1265,10 @@ int clash_start(struct box_rt *rt) {
     if (net_parse_hostport(ctl, 9090, &a, &l)) { LOGE("clash_api: адрес %s не разобрался", ctl); free(cl); return -1; }
     cl->lfd = net_listen(&a, l, 0);
     if (cl->lfd < 0) { LOGE("clash_api: %s не слушается: %s", ctl, strerror(errno)); free(cl); return -1; }
+    const struct jval *ao = jget(api, "access_control_allow_origin");
+    if (ao && ao->t == J_STR) { cl->origins = jnew(J_ARR); jarr_push(cl->origins, jdup(ao)); }
+    else if (ao && ao->t == J_ARR) cl->origins = jdup(ao);
+    cl->allow_pna = jgetb(api, "access_control_allow_private_network", 0);
     ev_add(rt->ev, cl->lfd, EPOLLIN, accept_cb, cl);
     ev_timer(rt->ev, 1000, ws_tick, cl);
     rt->clash = cl;
