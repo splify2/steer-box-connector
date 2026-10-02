@@ -91,6 +91,10 @@ struct qctx {
     int disable_cache;
     int must_fake;              /* спросили dnsd ради fakeip-сервера: отказ — к dns.final */
     long long dnsd_since;       /* когда вопрос ушёл к dnsd (повтор после ECONNREFUSED) */
+    /* Опции до правила над набором, которое ждёт ответа dnsd: не совпало — они возвращаются. */
+    int opts_saved;
+    long saved_ttl;
+    int saved_strategy, saved_cache;
     char via[128];              /* сервер, которым отвечаем (для кэша) */
 };
 
@@ -568,6 +572,13 @@ static void apply_options(struct qctx *c, const struct jval *r) {
 
 static void eval(struct qctx *c) {
     struct dns_srv *s = c->s;
+    if (c->opts_saved) {
+        /* Сюда вернулись после правила над набором, которое не совпало (REFUSED, отказ dnsd). */
+        c->rewrite_ttl = c->saved_ttl;
+        c->strategy = c->saved_strategy;
+        c->disable_cache = c->saved_cache;
+        c->opts_saved = 0;
+    }
     const struct jval *rules = jget(jget(s->rt->cfg, "dns"), "rules");
     while (c->next_rule < jlen(rules)) {
         const struct jval *r = jat(rules, c->next_rule++);
@@ -580,12 +591,14 @@ static void eval(struct qctx *c) {
              * dnsd и есть ответ этого правила. route-options с набором — не откладывается
              * (опции без ответа), его совпадение неизвестно; пропускаем. */
             if (!strcmp(act, "route") || !strcmp(act, "reject")) {
-                if (!strcmp(act, "route")) {
-                    long saved = c->rewrite_ttl;
-                    apply_options(c, r);
-                    (void)saved;
-                }
                 if (c->l == s->internal) continue;      /* свои соединения — настоящие адреса */
+                if (!strcmp(act, "route")) {
+                    c->saved_ttl = c->rewrite_ttl;
+                    c->saved_strategy = c->strategy;
+                    c->saved_cache = c->disable_cache;
+                    c->opts_saved = 1;
+                    apply_options(c, r);
+                }
                 ask_dnsd(c, 0);
                 return;
             }
