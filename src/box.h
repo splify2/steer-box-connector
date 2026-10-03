@@ -10,6 +10,9 @@
 #ifndef STEER_VERSION
 #define STEER_VERSION "dev"
 #endif
+#ifndef STEER_REV
+#define STEER_REV "dev"
+#endif
 #define BOX_VERSION STEER_VERSION
 
 /* Глобальные ключи sing-box: `-c` (можно несколько — конфиги сливаются), `-C` (каталог: все

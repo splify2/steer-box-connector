@@ -29,7 +29,9 @@ int cmd_version(void) {
     printf("sing-box version %s%s\n\n", s.sb_version, ext ? "-extended" : "");
     printf("Environment: steer-box-connector %s linux/%s\n", BOX_VERSION, goarch);
     printf("Tags: with_quic,with_utls,with_clash_api,with_gvisor,with_wireguard\n");
-    printf("Revision: steer-box-connector-%s\n", BOX_VERSION);
+    /* Сборка ядра steer (STEER_REV: тег выпуска или «<версия>-g<коммит>»): предварительный выпуск и
+     * выпуск одной версии различаются только ею. */
+    printf("Revision: steer-box-connector-%s steer-%s\n", BOX_VERSION, STEER_REV);
     printf("CGO: disabled\n");
     return 0;
 }
