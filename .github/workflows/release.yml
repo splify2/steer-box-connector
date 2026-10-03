@@ -45,14 +45,24 @@ jobs:
             tag="v$v-pre.$sha"; pre=true; name="steer-box-connector $v (предварительный, steer $sha)"
           fi
           {
-            echo "VERSION=$v"; echo "STEER_SHA=$sha"; echo "STEER_REF=$ref"
+            echo "VERSION=$v"; echo "STEER_SHA=$sha"; echo "STEER_REF=${ref#origin/}"
             echo "TAG=$tag"; echo "PRE=$pre"; echo "NAME=$name"
           } >> "$GITHUB_ENV"
           echo "steer: $ref ($sha), версия $v, тег коннектора $tag"
+      - name: Стенды
+        # Проверки tests/t_*.c (cc хоста с ASan и UBSan) и стенд rpcd: красный стенд гасит выпуск.
+        # Стенд пакета (tests/pkg.sh) здесь не нужен: ту же сборку делает следующий шаг.
+        run: sh tests/run.sh
       - name: Сборка
         run: |
           sh build.sh --bundle 2>&1 | tee /tmp/build.log
           if grep -q FAILED /tmp/build.log; then echo "::error::не все архитектуры собрались"; exit 1; fi
+          # Набор молча пропускает архитектуру, у которой не собрался хоть один пакет steer
+          # (steer/build.sh при FAILED архитектуры ошибкой не выходит), — а текст выпуска обещает
+          # набор под все архитектуры.
+          if grep -q 'архитектура пропущена' /tmp/build.log || grep -q FAILED build/steer.log; then
+            echo "::error::в тестовом наборе не все архитектуры — build/steer.log"; exit 1
+          fi
           ls out/*.tar.gz >/dev/null || { echo "::error::тестовый набор не собрался"; exit 1; }
       - name: Текст выпуска
         # Один текст на два выпуска: этот файл идёт и в выпуск здесь, и в splify2/releases
