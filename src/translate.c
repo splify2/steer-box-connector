@@ -952,8 +952,14 @@ static const char *emit_output(struct tr *t, const char *tag, int depth) {
         char dev[16];
         snprintf(dev, sizeof dev, "sbx%u", t->dev_seq++);
         jobj_set(o, "device", jstr(dev));
+        /* tls.insecure — ключ insecure выхода у всех видов с TLS (vless, trojan, vmess, http).
+         * Без него steer-proxy пропускает узел trojan/https с allowInsecure («включите insecure у
+         * выхода явно»), а vmess сверяет сертификат. У hysteria2 ключа нет: insecure=1 в ссылке. */
         const struct jval *tls = jget(ob, "tls");
-        if (!strcmp(type, "vless") && tls && jgetb(tls, "insecure", 0)) jobj_set(o, "insecure", jbool(1));
+        if (tls && jgetb(tls, "enabled", 0) && jgetb(tls, "insecure", 0) &&
+            (!strcmp(type, "vless") || !strcmp(type, "trojan") || !strcmp(type, "vmess") ||
+             !strcmp(type, "http")))
+            jobj_set(o, "insecure", jbool(1));
         const char *det = jgets(ob, "detour");
         if (det) {
             const char *over = emit_output(t, det, depth + 1);
