@@ -14,14 +14,18 @@
 # берутся системные пути.
 . "${JSHN_SH:-/usr/share/libubox/jshn.sh}"
 OPENWRT_RELEASE=${OPENWRT_RELEASE:-/etc/openwrt_release}
+SING_BOX=${SING_BOX:-/usr/bin/sing-box}
 
 REPO=splify2/steer
 # Перечень выпусков splify2/releases — три адреса одного version.json, по порядку. Он ПЕРВЫЙ
 # источник версий и адресов файлов; api.github.com и прямая ссылка выпуска — запасной путь.
 REL_URLS="https://raw.githubusercontent.com/splify2/releases/main/version.json https://cdn.jsdelivr.net/gh/splify2/releases@main/version.json https://splify2.github.io/releases/version.json"
 REL=/tmp/steer-box-version.json
-# Продукт steer в перечне.
+# Продукты steer и коннектора в перечне.
 RP="@.products['steer'].versions"
+RP_BOX="@.products['steer-box-connector'].versions"
+# Пакеты steer, которые бывают у коннектора (status и смена версии).
+MODS="steer-core steer-vless steer-hysteria2 steer-proxy steer-xsteer steer-obfs steer-tgws"
 CONF=$(uci -q get sing-box.main.conffile)
 [ -n "$CONF" ] || CONF=/etc/sing-box/config.json
 
@@ -112,10 +116,11 @@ sum_ok() {  # ФАЙЛ SHA256
 }
 
 # Пакет: адреса из перечня по порядку (сумма не сошлась — следующий), затем прежняя ссылка выпуска
-# steer, если её не было среди них. Сумма сверяется у файла с любого адреса.
-pkg_fetch() {  # ВЕРСИЯ ИМЯ_ФАЙЛА ФАЙЛ
+# steer (у коннектора — его выпуска), если её не было среди них. Сумма сверяется у файла с любого
+# адреса. RP и REPO — продукт: steer или сам коннектор.
+pkg_fetch() {  # ВЕРСИЯ ИМЯ_ФАЙЛА ФАЙЛ [РЕПОЗИТОРИЙ]
 	rel_asset "$1" "$2"
-	old="https://github.com/$REPO/releases/download/v$1/$2"
+	old="https://github.com/${4:-$REPO}/releases/download/v$1/$2"
 	case " $URLS " in *" $old "*) ;; *) URLS="$URLS $old" ;; esac
 	for u in $URLS; do
 		if fetch "$u" "$3" && sum_ok "$3" "$SUM"; then
@@ -134,7 +139,7 @@ call)
 	case "$2" in
 	status)
 		json_init
-		ver_line=$(/usr/bin/sing-box version 2>/dev/null | head -n1)
+		ver_line=$("$SING_BOX" version 2>/dev/null | head -n1)
 		json_add_string sing_box "${ver_line#sing-box version }"
 		json_add_string variant "$(uci -q get steer-box.main.variant)"
 		json_add_string version "$(uci -q get steer-box.main.version)"
@@ -144,10 +149,10 @@ call)
 		json_add_string arch "$(pkg_arch)"
 		# Самая старая версия steer, с которой работает этот коннектор (его пакет зависит от
 		# steer-core той же версии).
-		json_add_string steer_min "$(/usr/bin/sing-box version 2>/dev/null | sed -n 's/.*steer-box-connector \([0-9.]*\).*/\1/p' | head -n1)"
-		needs=$(/usr/bin/sing-box -c "$CONF" box-needs 2>/dev/null)
+		json_add_string steer_min "$("$SING_BOX" version 2>/dev/null | sed -n 's/.*steer-box-connector \([0-9.]*\).*/\1/p' | head -n1)"
+		needs=$("$SING_BOX" -c "$CONF" box-needs 2>/dev/null)
 		json_add_array packages
-		for p in steer-core steer-vless steer-hysteria2 steer-proxy steer-xsteer steer-obfs; do
+		for p in $MODS; do
 			json_add_object
 			json_add_string name "$p"
 			json_add_string installed "$(pkg_version "$p")"
@@ -195,16 +200,30 @@ call)
 		''|*[!0-9.]*) json_add_boolean ok 0; json_add_string error "в версии допустимы только цифры и точки"; json_dump; exit 0 ;;
 		esac
 		if [ -z "$pkgs" ]; then
-			pkgs=$(/usr/bin/sing-box -c "$CONF" box-needs 2>/dev/null | jsonfilter -e '@[*]')
+			pkgs=$("$SING_BOX" -c "$CONF" box-needs 2>/dev/null | jsonfilter -e '@[*]')
 			[ -n "$pkgs" ] || pkgs=steer-core
 		fi
+		# Пакеты steer и коннектор зависят друг от друга с точной версией (steer-core = версия).
+		# Другая версия ставится только вся разом: каждый стоящий пакет steer этой же версией (иначе
+		# менеджер пакетов откажет всей транзакции или, opkg, оставит модуль старой версии при новом
+		# ядре) и коннектор той же версии — с его выпуска.
+		cur=$("$SING_BOX" version 2>/dev/null | sed -n 's/.*steer-box-connector \([0-9.]*\).*/\1/p' | head -n1)
+		box=0
+		if [ "$ver" != "$cur" ]; then
+			for p in $MODS; do
+				[ -n "$(pkg_version "$p")" ] && pkgs="$pkgs $p"
+			done
+			box=1
+		fi
 		arch=$(pkg_arch); ext=$(pkg_ext)
-		files=""
+		files=""; seen=" "
 		rel_load
 		for p in $pkgs; do
-			case "$p" in steer-*) ;; *) continue ;; esac
+			case "$p" in steer-box-connector) continue ;; steer-*) ;; *) continue ;; esac
 			# Имя идёт в путь файла в /tmp и в адрес: только знаки имён пакетов, без «/» и «..».
 			case "$p" in *[!a-z0-9-]*) continue ;; esac
+			case "$seen" in *" $p "*) continue ;; esac
+			seen="$seen$p "
 			f="/tmp/$p-$ver-1_$arch.$ext"
 			if ! pkg_fetch "$ver" "$p-$ver-1_$arch.$ext" "$f"; then
 				rm -f $files "$f" "$REL"
@@ -214,6 +233,18 @@ call)
 			fi
 			files="$files $f"
 		done
+		if [ "$box" = 1 ]; then
+			p=steer-box-connector
+			f="/tmp/$p-$ver-1_$arch.$ext"
+			RP="$RP_BOX"
+			if ! pkg_fetch "$ver" "$p-$ver-1_$arch.$ext" "$f" splify2/steer-box-connector; then
+				rm -f $files "$f" "$REL"
+				json_add_boolean ok 0
+				json_add_string error "нет выпуска steer-box-connector $ver для $arch"
+				json_dump; exit 0
+			fi
+			files="$files $f"
+		fi
 		rm -f "$REL"
 		if [ "$ext" = apk ]; then
 			out=$(apk add --allow-untrusted $files 2>&1)

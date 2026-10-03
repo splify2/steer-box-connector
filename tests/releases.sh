@@ -45,14 +45,24 @@ f="$T/www/$(printf '%s' "${url#*://}" | tr '?' '_')"
 [ -f "$f" ] || exit 22
 cp "$f" "$out"
 EOF
+# Стоящие пакеты — строки «имя версия» в $T/installed.
 cat > "$T/bin/apk" <<'EOF'
 #!/bin/sh
 case "$1" in
     add) shift; for a in "$@"; do case "$a" in -*) ;; *) printf '%s %s\n' "${a##*/}" "$(cat "$a")" >> "$T/apk.log" ;; esac; done ;;
     --print-arch) echo x86_64 ;;
-    info) exit 1 ;;
+    info) grep -q "^$3 " "$T/installed" 2>/dev/null || exit 1 ;;
+    list) awk -v p="$3" '$1 == p { print p "-" $2 "-r1 x86_64 {" p "} (GPL-3.0) [installed]" }' "$T/installed" 2>/dev/null ;;
 esac
 exit 0
+EOF
+# Коннектор этой сборки — 2.0.0 (так его видит rpcd по `sing-box version`).
+cat > "$T/bin/sing-box" <<'EOF'
+#!/bin/sh
+case "$*" in
+    *version*) printf 'sing-box version 1.13.21-extended\n\nEnvironment: steer-box-connector 2.0.0 linux/amd64\n' ;;
+    *) exit 1 ;;
+esac
 EOF
 printf '#!/bin/sh\nexit 1\n' > "$T/bin/uci"
 printf '#!/bin/sh\nexit 1\n' > "$T/bin/pgrep"
@@ -103,12 +113,12 @@ printf "DISTRIB_ARCH='x86_64'\n" > "$T/openwrt_release"
 
 rpcd() {  # МЕТОД [ВХОД]
     printf '%s\n' "${2:-}" | env T="$T" PATH="$T/bin:$PATH" JSHN_SH="$ROOT/tests/stub/jshn.sh" \
-        OPENWRT_RELEASE="$T/openwrt_release" sh "$RPCD" call "$1" 2>"$T/stderr"
+        OPENWRT_RELEASE="$T/openwrt_release" SING_BOX="$T/bin/sing-box" sh "$RPCD" call "$1" 2>"$T/stderr"
 }
 jget() { python3 -c 'import json,sys
 d=json.load(sys.stdin); v=d.get(sys.argv[1])
 print("" if v is None else json.dumps(v, ensure_ascii=False) if isinstance(v,(list,dict,bool)) else v)' "$1"; }
-reset() { rm -rf "$T/www" "$T/curl.log" "$T/apk.log"; mkdir -p "$T/www"; : > "$T/curl.log"; : > "$T/apk.log"; }
+reset() { rm -rf "$T/www" "$T/curl.log" "$T/apk.log" "$T/installed"; mkdir -p "$T/www"; : > "$T/curl.log"; : > "$T/apk.log"; }
 put() {  # URL ФАЙЛ_ИЛИ_ТЕКСТ
     f="$T/www/$(printf '%s' "${1#*://}" | tr '?' '_')"; mkdir -p "${f%/*}"
     if [ -f "$2" ]; then cp "$2" "$f"; else printf '%s\n' "$2" > "$f"; fi
@@ -127,21 +137,24 @@ SRC=https://github.com/splify2/steer/releases/download
 mkrel() {  # ФАЙЛ
     python3 - "$1" <<'PY'
 import hashlib, json, sys
-def a(tag, ver, n):
+def a(tag, ver, n, repo="steer"):
     return {"name": n, "size": 10, "sha256": hashlib.sha256(f"GOOD-{n}\n".encode()).hexdigest(),
             "urls": [f"https://github.com/splify2/releases/releases/download/{tag}/{n}",
-                     f"https://github.com/splify2/steer/releases/download/v{ver}/{n}"]}
-def v(ver, ch, names):
-    tag = f"steer-v{ver}"
+                     f"https://github.com/splify2/{repo}/releases/download/v{ver}/{n}"]}
+def v(ver, ch, names, prod="steer"):
+    tag = f"{prod}-v{ver}"
     return {"version": ver, "channel": ch, "date": "2026-10-02", "tag": tag,
-            "source": f"https://github.com/splify2/steer/releases/tag/v{ver}",
-            "changelog": f"changelogs/steer/{ver}.md", "assets": [a(tag, ver, n) for n in names]}
+            "source": f"https://github.com/splify2/{prod}/releases/tag/v{ver}",
+            "changelog": f"changelogs/{prod}/{ver}.md", "assets": [a(tag, ver, n, prod) for n in names]}
 X = "x86_64"
 doc = {"schema": 1, "updated": "2026-10-02T12:00:00Z", "products": {"steer": {
     "title": "Ядро steer", "repo": "splify2/steer", "stable": "1.5.9", "prerelease": "2.0.0",
     "versions": [v("2.0.0", "prerelease", [f"steer-core-2.0.0-1_{X}.apk", f"steer-vless-2.0.0-1_{X}.apk"]),
                  v("1.5.9", "stable", [f"steer-1.5.9-1_{X}.apk", f"steer-extended-1.5.9-1_{X}.apk"]),
-                 v("1.5.8-rc1", "stable", [f"steer-1.5.8-rc1-1_{X}.apk"])]}}}
+                 v("1.5.8-rc1", "stable", [f"steer-1.5.8-rc1-1_{X}.apk"])]},
+    "steer-box-connector": {"title": "steer-box-connector", "repo": "splify2/steer-box-connector",
+    "stable": "2.1.0", "prerelease": None,
+    "versions": [v("2.1.0", "stable", [f"steer-box-connector-2.1.0-1_{X}.apk"], "steer-box-connector")]}}}
 json.dump(doc, open(sys.argv[1], "w"), ensure_ascii=False, indent=1)
 PY
 }
@@ -206,13 +219,57 @@ put "$REL/steer-v2.0.0/$CORE" "BAD"; put "$SRC/v2.0.0/$CORE" "BAD"
 out="$(rpcd install '{"version":"2.0.0","packages":["steer-core"]}')"
 check "сумма не сошлась нигде — не ставится" "false;" "$(printf '%s' "$out" | jget ok);$(cat "$T/apk.log")"
 
-# Версии нет в version.json — прежняя ссылка выпуска steer.
+# Файла нет в version.json — прежняя ссылка выпуска steer.
+PROXY=steer-proxy-2.0.0-1_x86_64.apk
 reset
 put "$RAW" "$T/version.json"
-put "$SRC/v1.5.7/steer-core-1.5.7-1_x86_64.apk" "OLD"
-out="$(rpcd install '{"version":"1.5.7","packages":["steer-core"]}')"
-check "версии нет в version.json — прежняя ссылка выпуска" "true;$SRC/v1.5.7/steer-core-1.5.7-1_x86_64.apk" \
-      "$(printf '%s' "$out" | jget ok);$(grep 'steer-core' "$T/curl.log" | head -1)"
+put "$SRC/v2.0.0/$PROXY" "OLD"
+out="$(rpcd install '{"version":"2.0.0","packages":["steer-proxy"]}')"
+check "файла нет в version.json — прежняя ссылка выпуска" "true;$SRC/v2.0.0/$PROXY" \
+      "$(printf '%s' "$out" | jget ok);$(grep 'steer-proxy' "$T/curl.log" | head -1)"
+
+# ---- install другой версии: steer и коннектор — вместе ------------------------------------
+# Пакеты зависят друг от друга с точной версией: другая версия steer — это каждый стоящий пакет
+# steer той же версией и коннектор той же версии с его выпуска; иначе менеджер пакетов отказывает
+# всей транзакции (apk) или оставляет модуль и коннектор старыми при новом ядре (opkg).
+BOX=https://github.com/splify2/steer-box-connector/releases/download
+reset
+put "$RAW" "$T/version.json"
+printf 'steer-core 2.0.0\nsteer-hysteria2 2.0.0\nsteer-box-connector 2.0.0\n' > "$T/installed"
+for p in steer-core steer-hysteria2; do put "$SRC/v2.1.0/$p-2.1.0-1_x86_64.apk" "NEW-$p"; done
+SBC=steer-box-connector-2.1.0-1_x86_64.apk
+put "$REL/steer-box-connector-v2.1.0/$SBC" "GOOD-$SBC"
+put "$BOX/v2.1.0/$SBC" "SRC-box"
+out="$(rpcd install '{"version":"2.1.0","packages":["steer-core"]}')"
+check "другая версия: стоящие модули и коннектор — той же версией" \
+      "true;steer-core-2.1.0-1_x86_64.apk NEW-steer-core;steer-hysteria2-2.1.0-1_x86_64.apk NEW-steer-hysteria2;$SBC GOOD-$SBC" \
+      "$(printf '%s' "$out" | jget ok);$(tr '\n' ';' < "$T/apk.log" | sed 's/;$//')"
+check "коннектор — с первого адреса продукта steer-box-connector в version.json" \
+      "$REL/steer-box-connector-v2.1.0/$SBC" "$(grep "$SBC" "$T/curl.log" | head -1)"
+
+reset
+printf 'steer-core 2.0.0\n' > "$T/installed"
+put "$SRC/v2.1.0/steer-core-2.1.0-1_x86_64.apk" "NEW-steer-core"
+put "$BOX/v2.1.0/$SBC" "SRC-box"
+out="$(rpcd install '{"version":"2.1.0","packages":["steer-core"]}')"
+check "version.json недоступен — коннектор прежней ссылкой его выпуска" "true;$SBC SRC-box" \
+      "$(printf '%s' "$out" | jget ok);$(grep "$SBC" "$T/apk.log")"
+
+reset
+put "$RAW" "$T/version.json"
+printf 'steer-core 2.0.0\n' > "$T/installed"
+put "$SRC/v2.1.0/steer-core-2.1.0-1_x86_64.apk" "NEW-steer-core"
+out="$(rpcd install '{"version":"2.1.0","packages":["steer-core"]}')"
+check "другая версия без выпуска коннектора — не ставится ничего" "false;" \
+      "$(printf '%s' "$out" | jget ok);$(cat "$T/apk.log")"
+
+reset
+put "$RAW" "$T/version.json"
+printf 'steer-core 2.0.0\nsteer-box-connector 2.0.0\n' > "$T/installed"
+put "$REL/steer-v2.0.0/$CORE" "GOOD-$CORE"
+out="$(rpcd install '{"version":"2.0.0","packages":["steer-core","steer-box-connector"]}')"
+check "та же версия — коннектор не качается и с выпуска steer не берётся" "true;0;$CORE GOOD-$CORE" \
+      "$(printf '%s' "$out" | jget ok);$(grep -c 'steer-box-connector' "$T/curl.log");$(cat "$T/apk.log")"
 
 # version.json недоступен — пакет прежней ссылкой, без сверки.
 reset
