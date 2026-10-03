@@ -638,11 +638,47 @@ static void tls_transport_params(struct strbuf *b, int *first, const struct jval
     }
 }
 
+/* Узлу vless нужна ссылка, а не конфиг sing-box: транспорт xhttp или шифрование VLESS. */
+static int vless_needs_link(const struct jval *ob) {
+    const struct jval *tr = jget(ob, "transport");
+    const char *tt = tr ? jgets(tr, "type") : NULL;
+    const char *enc = jgets(ob, "encryption");
+    return (tt && !strcmp(tt, "xhttp")) || (enc && *enc && strcmp(enc, "none"));
+}
+
 static int node_text(struct tr *t, const struct jval *ob, struct strbuf *b) {
     const char *type = jgets(ob, "type");
     const char *server = jgets(ob, "server");
     long port = jgeti(ob, "server_port", 443);
     int first = 1;
+    if (!strcmp(type, "vless") && vless_needs_link(ob)) {
+        /* Ссылка vless:// — у xhttp и у шифрования VLESS. Разбор конфига sing-box в ядре steer
+         * берёт у транспорта path и host только для ws и httpupgrade, а encryption не читает
+         * вовсе: узел xhttp от forkop (extended) уходил с путём «/» без host и mode, а узел с
+         * encryption — без шифрования, и сервер его не принимал. Ссылка несёт всё это (как
+         * подписки Xray): path, host, mode, extra с xPaddingBytes, encryption, flow. */
+        const char *enc = jgets(ob, "encryption");
+        raw(b, "vless://");
+        pct(b, jgets(ob, "uuid") ? jgets(ob, "uuid") : "");
+        raw(b, "@");
+        host_port(b, server, port);
+        qparam(b, &first, "encryption", enc && *enc ? enc : "none");
+        qparam(b, &first, "flow", jgets(ob, "flow"));
+        tls_transport_params(b, &first, ob);
+        const struct jval *tr = jget(ob, "transport");
+        const struct jval *pad = tr ? jget(tr, "x_padding_bytes") : NULL;
+        char pb[64] = "";
+        if (pad && pad->t == J_STR && pad->s[0]) snprintf(pb, sizeof pb, "%s", pad->s);
+        else if (pad && pad->t == J_NUM) snprintf(pb, sizeof pb, "%lld", (long long)pad->i);
+        if (pb[0] && !strpbrk(pb, "\"\\")) {
+            char ex[128];
+            snprintf(ex, sizeof ex, "{\"xPaddingBytes\":\"%s\"}", pb);
+            qparam(b, &first, "extra", ex);
+        }
+        if (jgets(ob, "tag")) { raw(b, "#"); pct(b, jgets(ob, "tag")); }
+        raw(b, "\n");
+        return 0;
+    }
     if (!strcmp(type, "vless")) {
         /* Конфиг sing-box: подписка steer его читает. detour и тег не нужны узлу — цепочку
          * ведёт ключ over выхода. */
