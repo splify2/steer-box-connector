@@ -16,6 +16,8 @@
 #include "sbconf.h"
 #include "steerctl.h"
 #include "bconn.h"
+#include "translate.h"
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -313,6 +315,8 @@ struct djob {
     int dormant;            /* спящий член селектора: замер — соединение TCP с его сервером */
     char host[256];
     uint16_t port;
+    char *udp_txt;          /* спящий узел hysteria2: строка подписки для пробы ядра (QUIC) */
+    char steerd[128];
     int is_group;
     /* группа: члены и их результаты */
     size_t n;
@@ -322,10 +326,14 @@ struct djob {
     int *delays;
     char (*hosts)[256];     /* у спящих — сервер, иначе "" */
     uint16_t *ports;
+    char **udp_txts;        /* у спящих hysteria2 — строка подписки, иначе NULL */
 };
 
-/* Спящий член селектора (в карте dormant): его сервер и порт из конфига. 0 — да. */
-static int dormant_target(struct box_rt *rt, const char *tag, char *host, size_t n, uint16_t *port) {
+/* Спящий член селектора (в карте dormant): его сервер и порт из конфига. 0 — да. У hysteria2 сервер
+ * слушает только UDP (QUIC), и соединение TCP показало бы живой узел мёртвым: ему в udp_txt — строка
+ * подписки, по которой замер делает проба ядра (рукопожатие QUIC и авторизация). */
+static int dormant_target(struct box_rt *rt, const char *tag, char *host, size_t n, uint16_t *port,
+                          char **udp_txt) {
     if (!jgetb(jget(jget(rt->map, "outbounds"), tag), "dormant", 0)) return -1;
     const struct jval *ob = sb_outbound(rt->cfg, tag);
     const char *srv = jgets(ob, "server");
@@ -333,7 +341,65 @@ static int dormant_target(struct box_rt *rt, const char *tag, char *host, size_t
     if (!srv || p <= 0 || p > 65535) return -1;
     snprintf(host, n, "%s", srv);
     *port = (uint16_t)p;
+    if (jgets(ob, "type") && !strcmp(jgets(ob, "type"), "hysteria2")) {
+        char e[200];
+        *udp_txt = box_node_text(ob, e, sizeof e);
+        if (!*udp_txt) LOGD("замер %s: %s", tag, e);
+    }
     return 0;
+}
+
+/* Задержка спящего узла hysteria2 — проба ядра steer (`steerd hysteria2-probe <файл> --node 0`):
+ * рукопожатие QUIC и авторизация, как при подъёме выхода, без устройства и без процесса туннеля.
+ * Мс рукопожатия; -1 — узел не ответил или пробы нет (нет пакета steer-hysteria2). */
+static int measure_probe(const char *steerd, const char *txt, int timeout, char *err, size_t errn) {
+    char path[] = "/tmp/sbx-probe-XXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0) { snprintf(err, errn, "файл пробы: %s", strerror(errno)); return -1; }
+    size_t len = strlen(txt);
+    int wok = write(fd, txt, len) == (ssize_t)len;
+    close(fd);
+    if (!wok) { unlink(path); snprintf(err, errn, "файл пробы не записался"); return -1; }
+    int pfd[2];
+    if (pipe2(pfd, O_CLOEXEC)) { unlink(path); snprintf(err, errn, "pipe: %s", strerror(errno)); return -1; }
+    char secs[16];
+    snprintf(secs, sizeof secs, "%d", timeout >= 1000 ? (timeout + 999) / 1000 : 1);
+    char *argv[] = { (char *)steerd, (char *)"hysteria2-probe", path, (char *)"--node", (char *)"0",
+                     (char *)"--timeout", secs, NULL };
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, pfd[1], 1);
+    posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+    extern char **environ;
+    pid_t pid;
+    int rc = posix_spawn(&pid, steerd, &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(pfd[1]);
+    if (rc) { close(pfd[0]); unlink(path); snprintf(err, errn, "%s: %s", steerd, strerror(rc)); return -1; }
+    char buf[4096];
+    size_t got = 0;
+    ssize_t r;
+    while (got + 1 < sizeof buf && (r = read(pfd[0], buf + got, sizeof buf - got - 1)) > 0) got += (size_t)r;
+    char sink[256];
+    while (read(pfd[0], sink, sizeof sink) > 0) {}
+    close(pfd[0]);
+    buf[got] = 0;
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+    unlink(path);
+    char e2[128];
+    struct jval *v = json_parse(buf, got, e2, sizeof e2);
+    const struct jval *r0 = jat(jget(v, "results"), 0);
+    int ms = -1;
+    if (r0 && jgetb(r0, "ok", 0)) {
+        long hs = jgeti(r0, "handshake_ms", 0);
+        ms = hs > 0 ? (int)hs : 1;
+    } else {
+        const char *why = r0 ? jgets(r0, "why") : jgets(v, "error");
+        snprintf(err, errn, "%s", why && *why ? why : "проба не ответила");
+    }
+    json_free(v);
+    return ms;
 }
 
 /* Задержка спящего члена: время соединения TCP с его сервером напрямую. Поднимать туннель ради
@@ -373,6 +439,7 @@ static void *delay_member(void *p) {
     size_t i = m->i;
     char e[200];
     if (!j->egs_ok[i]) j->delays[i] = -1;
+    else if (j->udp_txts && j->udp_txts[i]) j->delays[i] = measure_probe(j->steerd, j->udp_txts[i], j->timeout, e, sizeof e);
     else if (j->hosts[i][0]) j->delays[i] = measure_dial(j->hosts[i], j->ports[i], &j->egs[i], j->timeout, e, sizeof e);
     else j->delays[i] = measure(j->url, &j->egs[i], j->timeout, e, sizeof e);
     return NULL;
@@ -382,6 +449,7 @@ static void delay_work(void *p) {
     struct djob *j = p;
     if (!j->is_group) {
         if (!j->eg_ok) j->delay = -1;
+        else if (j->udp_txt) j->delay = measure_probe(j->steerd, j->udp_txt, j->timeout, j->err, sizeof j->err);
         else if (j->dormant) j->delay = measure_dial(j->host, j->port, &j->eg, j->timeout, j->err, sizeof j->err);
         else j->delay = measure(j->url, &j->eg, j->timeout, j->err, sizeof j->err);
         return;
@@ -438,7 +506,11 @@ static void delay_done(void *p) {
         free(j->delays);
         free(j->hosts);
         free(j->ports);
+        if (j->udp_txts)
+            for (size_t i = 0; i < j->n; i++) free(j->udp_txts[i]);
+        free(j->udp_txts);
     }
+    free(j->udp_txt);
     hc_close(c);
     hc_unref(c);
     free(j);
@@ -487,6 +559,7 @@ static void start_delay(struct hc *c, const char *tag, int group) {
     j->c = c;
     j->rt = rt;
     snprintf(j->tag, sizeof j->tag, "%s", tag);
+    snprintf(j->steerd, sizeof j->steerd, "%s", rt->set.steerd);
     q_param(c->query, "url", j->url, sizeof j->url);
     if (!j->url[0]) snprintf(j->url, sizeof j->url, "https://www.gstatic.com/generate_204");
     char tbuf[32];
@@ -501,7 +574,7 @@ static void start_delay(struct hc *c, const char *tag, int group) {
             if (!now) break;
             t = now;
         }
-        if (!dormant_target(rt, t, j->host, sizeof j->host, &j->port)) {
+        if (!dormant_target(rt, t, j->host, sizeof j->host, &j->port, &j->udp_txt)) {
             j->dormant = 1;
             j->eg_ok = !rt_egress(rt, NULL, &j->eg, j->err, sizeof j->err);
         } else j->eg_ok = !rt_egress(rt, t, &j->eg, j->err, sizeof j->err);
@@ -515,7 +588,8 @@ static void start_delay(struct hc *c, const char *tag, int group) {
         j->delays = calloc(j->n + 1, sizeof *j->delays);
         j->hosts = calloc(j->n + 1, sizeof *j->hosts);
         j->ports = calloc(j->n + 1, sizeof *j->ports);
-        if (!j->tags || !j->egs || !j->egs_ok || !j->delays || !j->hosts || !j->ports) j->n = 0;
+        j->udp_txts = calloc(j->n + 1, sizeof *j->udp_txts);
+        if (!j->tags || !j->egs || !j->egs_ok || !j->delays || !j->hosts || !j->ports || !j->udp_txts) j->n = 0;
         for (size_t i = 0; i < j->n; i++) {
             if (jat(m, i)->t != J_STR) continue;
             snprintf(j->tags[i], sizeof j->tags[i], "%s", jat(m, i)->s);
@@ -527,7 +601,7 @@ static void start_delay(struct hc *c, const char *tag, int group) {
                 if (!now) break;
                 t = now;
             }
-            if (!dormant_target(rt, t, j->hosts[i], sizeof j->hosts[i], &j->ports[i]))
+            if (!dormant_target(rt, t, j->hosts[i], sizeof j->hosts[i], &j->ports[i], &j->udp_txts[i]))
                 j->egs_ok[i] = !rt_egress(rt, NULL, &j->egs[i], e, sizeof e);
             else j->egs_ok[i] = !rt_egress(rt, t, &j->egs[i], e, sizeof e);
         }

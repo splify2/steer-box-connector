@@ -39,6 +39,10 @@ int box_translate(const struct jval *cfg, const struct tr_opts *o, struct tr_res
                   char *err, size_t errn);
 void box_translate_free(struct tr_result *res);
 
+/* Узел выхода sing-box (vless, hysteria2, trojan…) строкой подписки steer — то, что перевод пишет в
+ * файл подписки выхода. NULL — тип не переводится (причина в err). Освобождает вызывающий. */
+char *box_node_text(const struct jval *ob, char *err, size_t errn);
+
 /* Путь, куда положить скачанный remote-набор с тегом tag (одно место на коннектор). */
 void box_ruleset_cache_path(const char *dir, const char *tag, const char *format, char *out, size_t n);
 

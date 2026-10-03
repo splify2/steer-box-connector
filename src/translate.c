@@ -839,6 +839,21 @@ static int node_text(struct tr *t, const struct jval *ob, struct strbuf *b) {
     return tfail(t, "outbound %s: тип %s не переводится", jgets(ob, "tag"), type);
 }
 
+char *box_node_text(const struct jval *ob, char *err, size_t errn) {
+    struct tr t;
+    memset(&t, 0, sizeof t);
+    char e0[8];
+    t.err = err ? err : e0;
+    t.errn = err ? errn : sizeof e0;
+    struct strbuf b = { 0 };
+    if (!ob || !jgets(ob, "type") || !jgets(ob, "server") || node_text(&t, ob, &b)) {
+        if (!t.failed) snprintf(t.err, t.errn, "узел не переводится");
+        free(b.p);
+        return NULL;
+    }
+    return b.p;
+}
+
 static int b64url_enc(const char *in, char *out, size_t n) {
     static const char tab[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     size_t len = strlen(in), j = 0;
