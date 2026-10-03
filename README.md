@@ -19,7 +19,7 @@
 
 ## Возможности
 
-- CLI sing-box, которым пользуются podkop и forkop: `version`, `check`, `format`, `merge`, `generate`, `rule-set`, `tools fetch`
+- CLI sing-box, которым пользуются podkop и forkop: `run`, `version`, `check`, `format`, `merge`, `generate`, `rule-set`, `tools fetch`
 - выходы direct, интерфейс, VLESS/Reality, hysteria2, trojan, shadowsocks, socks, http, vmess; группы selector и urltest
 - selector держит туннель только к выбранному узлу; выбор через Clash API
 - DNS: udp, tcp, DoT, DoH (HTTP/1.1 и HTTP/2), fake-IP, `dns.rules`
@@ -48,7 +48,8 @@ sh build.sh              # пакеты под все архитектуры (ST
 sh build.sh --bundle     # плюс тестовый набор
 ```
 
-Нужен docker. Версия коннектора — версия steer в подмодуле: пакет требует `steer-core` той же версии.
+Нужен docker. Версия коннектора — версия steer в подмодуле: пакет требует `steer-core` той же версии
+и той же сборки.
 
 ## Лицензия
 
