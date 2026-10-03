@@ -73,7 +73,10 @@ else
 			opkg remove --force-depends "$p"
 		fi
 	done
-	opkg install $files
+	# --force-reinstall: предварительный выпуск и выпуск одной версии — пакеты с одним номером, и без
+	# флага opkg считает стоящий пакет той же версии новым и ничего не ставит (apk файл с тем же
+	# номером, но другим содержимым заменяет сам).
+	opkg install --force-reinstall $files
 fi
 
 restore
