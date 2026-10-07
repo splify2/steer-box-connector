@@ -108,11 +108,14 @@ $(jsonfilter -i "$REL" -e "$RP[$vi].assets[$ai].sha256" -e "$RP[$vi].assets[$ai]
 EOF
 }
 
-# Сверка с sha256 из перечня. Суммы нет или нет sha256sum — сверять нечем.
+# Сверка с sha256 из перечня. Суммы нет — файл берётся без проверки (NOSUM=1, об этом скажет вывод);
+# сумма есть, а sha256sum нет — отказ (NOTOOL=1): непроверенное не ставится. SHA256SUM — шов стенда.
+SHA256SUM=${SHA256SUM:-sha256sum}
+NOSUM=0; NOTOOL=0
 sum_ok() {  # ФАЙЛ SHA256
-	[ -n "$2" ] || return 0
-	command -v sha256sum >/dev/null 2>&1 || return 0
-	[ "$(sha256sum "$1" 2>/dev/null | cut -d' ' -f1)" = "$2" ]
+	[ -n "$2" ] || { NOSUM=1; return 0; }
+	command -v "$SHA256SUM" >/dev/null 2>&1 || { NOTOOL=1; return 1; }
+	[ "$("$SHA256SUM" "$1" 2>/dev/null | cut -d' ' -f1)" = "$2" ]
 }
 
 # Пакет: адреса из перечня по порядку (сумма не сошлась — следующий), затем прежняя ссылка выпуска
@@ -228,7 +231,7 @@ call)
 			if ! pkg_fetch "$ver" "$p-$ver-1_$arch.$ext" "$f"; then
 				rm -f $files "$f" "$REL"
 				json_add_boolean ok 0
-				json_add_string error "не скачалось: $p $ver для $arch"
+				json_add_string error "не скачалось: $p $ver для $arch$([ "$NOTOOL" = 1 ] && echo " (нет sha256sum — сумму сверить нечем)")"
 				json_dump; exit 0
 			fi
 			files="$files $f"
@@ -240,7 +243,7 @@ call)
 			if ! pkg_fetch "$ver" "$p-$ver-1_$arch.$ext" "$f" splify2/steer-box-connector; then
 				rm -f $files "$f" "$REL"
 				json_add_boolean ok 0
-				json_add_string error "нет выпуска steer-box-connector $ver для $arch"
+				json_add_string error "нет выпуска steer-box-connector $ver для $arch$([ "$NOTOOL" = 1 ] && echo " (нет sha256sum — сумму сверить нечем)")"
 				json_dump; exit 0
 			fi
 			files="$files $f"
@@ -252,6 +255,8 @@ call)
 			out=$(opkg install --force-reinstall $files 2>&1)
 		fi
 		rc=$?
+		[ "$NOSUM" = 1 ] && out="без проверки суммы: для части файлов суммы в перечне нет
+$out"
 		rm -f $files
 		# Свой steerd у коннектора: служба steer без спеки ему мешает (те же таблицы).
 		if [ -x /etc/init.d/steer ] && [ ! -f /etc/steer/spec.json ] && [ ! -f /etc/steer/spec.yaml ]; then

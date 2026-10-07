@@ -113,7 +113,7 @@ printf "DISTRIB_ARCH='x86_64'\n" > "$T/openwrt_release"
 
 rpcd() {  # МЕТОД [ВХОД]
     printf '%s\n' "${2:-}" | env T="$T" PATH="$T/bin:$PATH" JSHN_SH="$ROOT/tests/stub/jshn.sh" \
-        OPENWRT_RELEASE="$T/openwrt_release" SING_BOX="$T/bin/sing-box" sh "$RPCD" call "$1" 2>"$T/stderr"
+        OPENWRT_RELEASE="$T/openwrt_release" ${SHA256SUM:+SHA256SUM="$SHA256SUM"} SING_BOX="$T/bin/sing-box" sh "$RPCD" call "$1" 2>"$T/stderr"
 }
 jget() { python3 -c 'import json,sys
 d=json.load(sys.stdin); v=d.get(sys.argv[1])
@@ -219,6 +219,14 @@ put "$REL/steer-v2.0.0/$CORE" "BAD"; put "$SRC/v2.0.0/$CORE" "BAD"
 out="$(rpcd install '{"version":"2.0.0","packages":["steer-core"]}')"
 check "сумма не сошлась нигде — не ставится" "false;" "$(printf '%s' "$out" | jget ok);$(cat "$T/apk.log")"
 
+# Сумма в перечне есть, а сверить её нечем (нет sha256sum) — не ставить непроверенное.
+reset
+put "$RAW" "$T/version.json"
+put "$REL/steer-v2.0.0/$CORE" "GOOD-$CORE"; put "$SRC/v2.0.0/$CORE" "GOOD-$CORE"
+out="$(SHA256SUM=/nonexistent/sha256sum rpcd install '{"version":"2.0.0","packages":["steer-core"]}')"
+check "сумма известна, sha256sum нет — не ставится" "false;" "$(printf '%s' "$out" | jget ok);$(cat "$T/apk.log")"
+check "отказ называет причину" "1" "$(printf '%s' "$out" | jget error | grep -c sha256sum)"
+
 # Файла нет в version.json — прежняя ссылка выпуска steer.
 PROXY=steer-proxy-2.0.0-1_x86_64.apk
 reset
@@ -227,6 +235,7 @@ put "$SRC/v2.0.0/$PROXY" "OLD"
 out="$(rpcd install '{"version":"2.0.0","packages":["steer-proxy"]}')"
 check "файла нет в version.json — прежняя ссылка выпуска" "true;$SRC/v2.0.0/$PROXY" \
       "$(printf '%s' "$out" | jget ok);$(grep 'steer-proxy' "$T/curl.log" | head -1)"
+check "суммы для файла нет — вывод говорит: без проверки суммы" "1" "$(printf '%s' "$out" | jget output | grep -c 'без проверки суммы')"
 
 # ---- install другой версии: steer и коннектор — вместе ------------------------------------
 # Пакеты зависят друг от друга с точной версией: другая версия steer — это каждый стоящий пакет
