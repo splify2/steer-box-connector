@@ -17,6 +17,7 @@
 #include <string.h>
 #include <strings.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
 #include <arpa/inet.h>
@@ -78,10 +79,22 @@ static void out_for_inbound(struct box_rt *rt, const char *tag, char *out, size_
 
 /* ---- проброс ---------------------------------------------------------------------------- */
 
+/* БЕЗ КОПИРОВАНИЯ В ПРОЦЕСС, когда ядро это умеет. Цикл read/write через буфер — два перехода
+ * границы ядра и два копирования на каждые 32 КБ; на роутере под гигагерц это видно в загрузке
+ * процессора. splice переставляет страницы через трубу внутри ядра (так же ходит мост Telegram в
+ * ядре steer, tgws.c relay_splice_once). Труба одна на соединение: каждая порция выливается из
+ * неё целиком, прежде чем браться за следующую, поэтому направления в ней не смешиваются. Трубу
+ * завести не вышло или ядро на этой паре splice не умеет (EINVAL) — прежний путь через буфер. */
+#define RELAY_CHUNK 65536
+static unsigned long g_relay_spliced;   /* сколько байт прошло через splice — для стенда */
+
 static void relay(int a, int b) {
     char buf[32768];
     struct pollfd p[2] = { { a, POLLIN, 0 }, { b, POLLIN, 0 } };
     int open_a = 1, open_b = 1;
+    int pp[2] = { -1, -1 };
+    int use_splice = pipe(pp) == 0;
+    if (use_splice) fcntl(pp[0], F_SETPIPE_SZ, RELAY_CHUNK);
     while (open_a || open_b) {
         p[0].events = open_a ? POLLIN : 0;
         p[1].events = open_b ? POLLIN : 0;
@@ -92,15 +105,36 @@ static void relay(int a, int b) {
         for (int i = 0; i < 2; i++) {
             if (!(p[i].revents & (POLLIN | POLLHUP | POLLERR))) continue;
             int from = i ? b : a, to = i ? a : b;
-            ssize_t n = read(from, buf, sizeof buf);
-            if (n <= 0) {
-                shutdown(to, SHUT_WR);
-                if (i) open_b = 0; else open_a = 0;
-                continue;
+            ssize_t n;
+            if (use_splice) {
+                n = splice(from, NULL, pp[1], NULL, RELAY_CHUNK, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                if (n < 0 && errno == EINVAL) { use_splice = 0; continue; }   /* не умеет — буфер */
+                if (n < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+                if (n > 0) {
+                    /* Вылить порцию целиком, блокирующе: байты уже в трубе, «потом» — значит
+                     * потерять их. */
+                    for (ssize_t left = n; left > 0;) {
+                        ssize_t w = splice(pp[0], NULL, to, NULL, (size_t)left, SPLICE_F_MOVE);
+                        if (w < 0 && errno == EINTR) continue;
+                        if (w <= 0) goto out;
+                        left -= w;
+                    }
+                    g_relay_spliced += (unsigned long)n;
+                    continue;
+                }
+            } else {
+                n = read(from, buf, sizeof buf);
+                if (n > 0) {
+                    if (write_all(to, buf, (size_t)n)) goto out;
+                    continue;
+                }
             }
-            if (write_all(to, buf, (size_t)n)) return;
+            shutdown(to, SHUT_WR);
+            if (i) open_b = 0; else open_a = 0;
         }
     }
+out:
+    if (pp[0] >= 0) { close(pp[0]); close(pp[1]); }
 }
 
 static int read_full(int fd, void *buf, size_t n) {
