@@ -49,7 +49,8 @@ EOF
 cat > "$T/bin/apk" <<'EOF'
 #!/bin/sh
 case "$1" in
-    add) shift; for a in "$@"; do case "$a" in -*) ;; *) printf '%s %s\n' "${a##*/}" "$(cat "$a")" >> "$T/apk.log" ;; esac; done ;;
+    add) shift; for a in "$@"; do case "$a" in -*) ;; *) printf '%s %s\n' "${a##*/}" "$(cat "$a")" >> "$T/apk.log" ;; esac; done
+         [ -f "$T/apk.rc" ] && exit "$(cat "$T/apk.rc")" ;;
     --print-arch) echo x86_64 ;;
     info) grep -q "^$3 " "$T/installed" 2>/dev/null || exit 1 ;;
     list) awk -v p="$3" '$1 == p { print p "-" $2 "-r1 x86_64 {" p "} (GPL-3.0) [installed]" }' "$T/installed" 2>/dev/null ;;
@@ -113,7 +114,7 @@ printf "DISTRIB_ARCH='x86_64'\n" > "$T/openwrt_release"
 
 rpcd() {  # МЕТОД [ВХОД]
     printf '%s\n' "${2:-}" | env T="$T" PATH="$T/bin:$PATH" JSHN_SH="$ROOT/tests/stub/jshn.sh" \
-        OPENWRT_RELEASE="$T/openwrt_release" ${SHA256SUM:+SHA256SUM="$SHA256SUM"} SING_BOX="$T/bin/sing-box" sh "$RPCD" call "$1" 2>"$T/stderr"
+        OPENWRT_RELEASE="$T/openwrt_release" APK_WORLD="$T/apk.world" APK_DB="$T/apk.db" ${SHA256SUM:+SHA256SUM="$SHA256SUM"} SING_BOX="$T/bin/sing-box" sh "$RPCD" call "$1" 2>"$T/stderr"
 }
 jget() { python3 -c 'import json,sys
 d=json.load(sys.stdin); v=d.get(sys.argv[1])
@@ -298,6 +299,43 @@ reset
 put "$RAW" "$T/version.json"
 out="$(rpcd install '{"version":"2.0.0","packages":["steer-../../etc/x"]}')"
 check "имя пакета с «/» не качается" "0" "$(grep -c 'etc/x' "$T/curl.log")"
+
+# ---- закрепления в /etc/apk/world после оборванной установки ---------------------------------
+# `apk add ФАЙЛ` (apk 3) пишет в world «имя><хеш файла»; транзакция, оборванная на середине
+# (кончилось место при распаковке второго пакета), оставляет хеши новых файлов при прежних пакетах в
+# базе, и дальше любая команда apk отвечает «unable to select packages: breaks:
+# world[steer-core><Q1…]» — не ставится даже чужой zapret. Воспроизведено на apk 3.0.5.
+reset
+put "$SRC/v2.0.0/$CORE" "SRC-$CORE"
+printf '%s\n' 'steer-core><QnEWcoreNEWcoreNEWcoreNEWcor=' 'steer-vless><QnEWvlessNEWvlessNEWvlessNEW=' \
+    'zapret><QgoodZapretGoodZapretGoodZapretG=' '!libsteer' > "$T/apk.world"
+printf '%s\n' 'C:QoLdcoreOLDcoreOLDcoreOLDcoreO=' 'P:steer-core' 'V:2.0.0-r1' '' \
+    'C:QgoodZapretGoodZapretGoodZapretG=' 'P:zapret' 'V:72-r1' '' > "$T/apk.db"
+printf '1\n' > "$T/apk.rc"
+out="$(rpcd install '{"version":"2.0.0","packages":["steer-core"]}')"
+check "обрыв install: отказ отдан как есть" "false" "$(printf '%s' "$out" | jget ok)"
+check "  закрепление стоящего ядра стало «именем»" "steer-core" "$(grep '^steer-core' "$T/apk.world")"
+check "  закрепление за пакетом, которого в базе нет, убрано" "0" "$(grep -c '^steer-vless' "$T/apk.world")"
+check "  чужое закрепление с верным хешом и запись !имя целы" \
+      "zapret><QgoodZapretGoodZapretGoodZapretG= !libsteer" \
+      "$(grep -e '^zapret' -e '^!' "$T/apk.world" | tr '\n' ' ' | sed 's/ $//')"
+rm -f "$T/apk.rc"
+printf '%s\n' 'steer-core><QnEWcoreNEWcoreNEWcoreNEWcor=' 'zapret><QgoodZapretGoodZapretGoodZapretG=' > "$T/apk.world"
+out="$(rpcd install '{"version":"2.0.0","packages":["steer-core"]}')"
+check "успешный install: закрепление нашего пакета за файлом снято" "steer-core" "$(grep '^steer-core' "$T/apk.world")"
+check "  чужое закрепление осталось" "zapret><QgoodZapretGoodZapretGoodZapretG=" "$(grep '^zapret' "$T/apk.world")"
+rm -f "$T/apk.world" "$T/apk.db"
+
+# Тот же помощник — в установщике набора (bundle/install.sh): достаётся текстом, как у стендов steer.
+eval "$(sed -n '/^PKG_OURS=/p; /^pkg_world_heal() {/,/^}/p' "$ROOT/bundle/install.sh")"
+printf '%s\n' 'steer-core><QnEWcoreNEWcoreNEWcoreNEWcor=' 'steer-box-connector><QnEWboxNEWboxNEWboxNEWboxNEWb=' \
+    'zapret><QgoodZapretGoodZapretGoodZapretG=' > "$T/apk.world"
+printf '%s\n' 'C:QoLdcoreOLDcoreOLDcoreOLDcoreO=' 'P:steer-core' 'V:2.0.0-r1' '' \
+    'C:QgoodZapretGoodZapretGoodZapretG=' 'P:zapret' 'V:72-r1' '' > "$T/apk.db"
+PATH="$T/bin:$PATH" APK_WORLD="$T/apk.world" APK_DB="$T/apk.db" pkg_world_heal "$PKG_OURS"
+check "bundle/install.sh: лечение world — ядро «именем», коннектор без пакета убран, чужое цело" \
+      "steer-core zapret><QgoodZapretGoodZapretGoodZapretG=" "$(tr '\n' ' ' < "$T/apk.world" | sed 's/ $//')"
+rm -f "$T/apk.world" "$T/apk.db"
 
 [ "$fails" -eq 0 ] && echo "все проверки прошли" || echo "ПРОВАЛОВ: $fails"
 [ "$fails" -eq 0 ]

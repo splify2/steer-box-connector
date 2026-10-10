@@ -59,11 +59,64 @@ restore() {
 }
 trap restore EXIT
 
+# Закрепления в /etc/apk/world, которые ни на что не указывают.
+#
+# `apk add ФАЙЛ` (apk 3) записывает в world не «имя», а «имя><хеш файла» — закрепление за этой
+# сборкой. Если транзакция оборвалась на середине (на роутере с малым флешем — «No space left on
+# device» при распаковке второго пакета набора), world уже записан с хешами НОВЫХ файлов, а в базе
+# остались прежние пакеты или не появилось вовсе нового. С этой минуты ЛЮБАЯ команда apk — и наша,
+# и чужая, хоть установка zapret — не решается: «unable to select packages: breaks:
+# world[steer-core><Q1…]». Воспроизведено на apk 3.0.5 (как на OpenWrt 25.12.5) с tmpfs на 4–5 МБ.
+#
+# Чиним правкой самого файла, без apk: решатель в таком состоянии отказывает и на `apk add имя`.
+# Что делаем с каждой записью «имя><хеш»:
+#   - пакета с таким именем нет в базе — запись убирается: она ничего не держит;
+#   - пакет стоит, но с другим хешом — становится просто «имя»;
+#   - наше имя (аргумент — регулярное выражение имён) — становится «имя» всегда: закрепление за
+#     файлом нужно только самой транзакции, дальше оно лишь не даёт apk увидеть пакет в фиде и
+#     ломает следующую установку той же версии другой сборки.
+# Записи без «><» (в том числе `!имя`) и закрепления чужих пакетов с верным хешом не трогаются.
+# Пути — APK_WORLD и APK_DB: стенды подставляют свои.
+PKG_OURS='^(steer|steer-.*|libsteer.*|steer-box-connector|luci-app-steer-box-connector)$'
+pkg_world_heal() {  # [ИМЕНА-ERE]
+	command -v apk >/dev/null 2>&1 || return 0
+	_wh_w="${APK_WORLD:-/etc/apk/world}"; _wh_d="${APK_DB:-/lib/apk/db/installed}"
+	[ -s "$_wh_w" ] && [ -s "$_wh_d" ] || return 0
+	grep -q '><' "$_wh_w" 2>/dev/null || return 0
+	grep -q '^P:' "$_wh_d" 2>/dev/null || return 0
+	_wh_t="$_wh_w.heal.$$"
+	if awk -v ours="${1:-^$}" '
+		FILENAME == ARGV[1] {
+			if ($0 ~ /^C:/) { c = substr($0, 3); if (p != "") id[p] = c }
+			else if ($0 ~ /^P:/) { p = substr($0, 3); if (c != "") id[p] = c }
+			if ($0 == "") { c = ""; p = "" }
+			next
+		}
+		{
+			i = index($0, "><")
+			if (i == 0) { print; next }
+			n = substr($0, 1, i - 1); q = substr($0, i + 2)
+			if (!(n in id)) next
+			if (n ~ ours || id[n] != q) print n; else print
+		}' "$_wh_d" "$_wh_w" > "$_wh_t" 2>/dev/null; then
+		cmp -s "$_wh_t" "$_wh_w" || mv "$_wh_t" "$_wh_w"
+	fi
+	rm -f "$_wh_t"
+	return 0
+}
+
 echo "Ставлю steer-box-connector $VER ($ARCH, .$fmt)."
 if [ "$fmt" = apk ]; then
 	apk update >/dev/null 2>&1 || echo "apk update не прошёл — ставлю с тем списком пакетов, что есть."
 	# Коннектор объявляет себя пакетом sing-box, и apk сам заменяет им sing-box из фида.
-	apk add --allow-untrusted $files
+	pkg_world_heal
+	rc=0
+	apk add --allow-untrusted $files || rc=$?
+	# При любом исходе: оборванная установка оставляет в world закрепления за файлами, которых в
+	# базе нет, — после неё не ставится ничто (см. pkg_world_heal). Закрепления за файлами нам и
+	# не нужны.
+	pkg_world_heal "$PKG_OURS"
+	[ "$rc" = 0 ] || exit "$rc"
 else
 	opkg update >/dev/null 2>&1 || echo "opkg update не прошёл — ставлю с тем списком пакетов, что есть."
 	# opkg сам пакет sing-box не заменяет — снимаем его (настройки в /etc/config/sing-box остаются).
