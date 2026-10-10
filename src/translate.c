@@ -718,6 +718,7 @@ static int node_text(struct tr *t, const struct jval *ob, struct strbuf *b) {
         if (spn > 0) {
             char buf[512] = "";
             const char **l = calloc((size_t)spn, sizeof *l);
+            if (!l) { tfail(t, "нет памяти"); return -1; }
             jstrlist(sp, l, (size_t)spn);
             for (long i = 0; i < spn; i++) {
                 char r[64];
@@ -988,6 +989,7 @@ static const char *emit_output(struct tr *t, const char *tag, int depth) {
     case SBO_TUNNEL: {
         const char *proto = tunnel_protocol(type);
         const char *name = names_get(&t->onames, tag, NULL);
+        if (!name) { tfail(t, "нет памяти"); return NULL; }
         char dir[1100], path[1100];
         snprintf(dir, sizeof dir, "%s/sub", t->o->dir);
         mkdirs(dir);
@@ -1185,6 +1187,7 @@ static int emit_rule_ex(struct tr *t, size_t idx, const struct jval *r, const ch
     long nrs = rsv ? jstrlist(rsv, NULL, 0) : 0;
     int realip = force_realip, any_set = 0, missing = 0;
     const char **sets = nrs > 0 ? calloc((size_t)nrs, sizeof *sets) : NULL;
+    if (nrs > 0 && !sets) return tfail(t, "нет памяти");
     if (nrs > 0) jstrlist(rsv, sets, (size_t)nrs);
     for (long i = 0; i < nrs; i++) {
         int rc = collect_set(t, &ps, sets[i]);
@@ -1260,6 +1263,7 @@ static int emit_rule_ex(struct tr *t, size_t idx, const struct jval *r, const ch
     }
     /* Правила с одним сужением сводятся в одно правило steer (to — несколько списков). */
     int *done = calloc(ps.n ? ps.n : 1, sizeof *done);
+    if (!done) { plist_free(&ps); return tfail(t, "нет памяти"); }
     unsigned part = 0;
     for (size_t i = 0; i < ps.n; i++) {
         if (done[i]) continue;

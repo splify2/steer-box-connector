@@ -460,13 +460,17 @@ static void delay_work(void *p) {
     struct dmem *ms = calloc(j->n + 1, sizeof *ms);
     char *started = calloc(j->n + 1, 1);
     for (size_t i = 0; i < j->n; i++) {
-        ms[i].j = j;
-        ms[i].i = i;
+        /* Не хватило памяти под потоки — тот же замер по очереди, на структуре со стека: ms
+         * мог не выделиться, и запись в ms[i] была бы записью по нулевому указателю. */
+        struct dmem one;
+        struct dmem *m = ms ? &ms[i] : &one;
+        m->j = j;
+        m->i = i;
         pthread_attr_t at;
         pthread_attr_init(&at);
         pthread_attr_setstacksize(&at, 128 * 1024);
-        if (th && ms && started && !pthread_create(&th[i], &at, delay_member, &ms[i])) started[i] = 1;
-        else delay_member(&ms[i]);
+        if (th && ms && started && !pthread_create(&th[i], &at, delay_member, m)) started[i] = 1;
+        else delay_member(m);
         pthread_attr_destroy(&at);
     }
     for (size_t i = 0; i < j->n; i++)
@@ -1162,6 +1166,7 @@ static void route_req(struct hc *c, const char *body) {
     if (!strcmp(path, "/connections")) {
         if (!strcmp(c->method, "DELETE")) {
             struct kjob *j = calloc(1, sizeof *j);
+            if (!j) { send_msg(c, 500, "нет памяти"); return; }
             j->c = c;
             j->rt = rt;
             snprintf(j->sock, sizeof j->sock, "%s", rt->sock);
@@ -1177,6 +1182,7 @@ static void route_req(struct hc *c, const char *body) {
     }
     if (!strncmp(path, "/connections/", 13) && !strcmp(c->method, "DELETE")) {
         struct kjob *j = calloc(1, sizeof *j);
+        if (!j) { send_msg(c, 500, "нет памяти"); return; }
         j->c = c;
         j->rt = rt;
         snprintf(j->sock, sizeof j->sock, "%s", rt->sock);
