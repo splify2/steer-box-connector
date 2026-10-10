@@ -107,9 +107,16 @@ static void dl_work(void *p) {
     char tmp[720];
     snprintf(tmp, sizeof tmp, "%s.part", j->path);
     f = fopen(tmp, "wb");
-    if (!f || fwrite(body, 1, n, f) != n || fclose(f)) {
+    /* fclose — ровно один раз: в прежней записи «… || fclose(f)» отказ закрытия (буфер не
+     * сбросился — диск полон) вёл ниже во второй fclose того же FILE, то есть в неопределённое
+     * поведение. Отказ закрытия — тоже «не записался». */
+    int bad = !f;
+    if (f) {
+        if (fwrite(body, 1, n, f) != n) bad = 1;
+        if (fclose(f)) bad = 1;
+    }
+    if (bad) {
         snprintf(j->err, sizeof j->err, "%s: не записался", tmp);
-        if (f) fclose(f);
         free(body);
         return;
     }
