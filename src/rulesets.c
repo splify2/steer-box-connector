@@ -230,6 +230,7 @@ int rs_start(struct box_rt *rt) {
     m->ino = -1;
     const struct jval *sets = jget(jget(rt->cfg, "route"), "rule_set");
     m->v = calloc(jlen(sets) + 1, sizeof *m->v);
+    if (!m->v) { free(m); return -1; }
     for (size_t i = 0; i < jlen(sets); i++) {
         const struct jval *s = jat(sets, i);
         const char *type = jgets(s, "type"), *tag = jgets(s, "tag");

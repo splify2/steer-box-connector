@@ -391,6 +391,7 @@ int mixed_start(struct box_rt *rt) {
             continue;
         }
         struct mlist *m = calloc(1, sizeof *m);
+        if (!m) { LOGE("mixed %s: нет памяти", jgets(in, "tag") ? jgets(in, "tag") : type); close(fd); continue; }
         m->fd = fd;
         snprintf(m->tag, sizeof m->tag, "%s", jgets(in, "tag") ? jgets(in, "tag") : type);
         out_for_inbound(rt, m->tag, m->out, sizeof m->out);
