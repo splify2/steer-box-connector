@@ -705,7 +705,7 @@ static void dummies_start(struct box_rt *rt) {
         for (int udp = 0; udp < 2; udp++) {
             int fd = net_listen(&a, l, udp);
             if (fd < 0) {
-                LOGW("вход %s: заглушка на %s:%lld не встала: %s", jgets(in, "tag"), listen,
+                LOGW("вход %s: заглушка на %s:%lld не встала: %s", jgets(in, "tag") ? jgets(in, "tag") : "?", listen ? listen : "0.0.0.0",
                      (long long)jgeti(in, "listen_port", 0), strerror(errno));
                 continue;
             }

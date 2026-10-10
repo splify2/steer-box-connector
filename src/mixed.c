@@ -387,7 +387,7 @@ int mixed_start(struct box_rt *rt) {
         if (net_parse_ip(listen ? listen : "0.0.0.0", (uint16_t)jgeti(in, "listen_port", 0), &a, &l)) continue;
         int fd = net_listen(&a, l, 0);
         if (fd < 0) {
-            LOGE("mixed %s: %s:%lld не слушается: %s", jgets(in, "tag"), listen ? listen : "", (long long)jgeti(in, "listen_port", 0), strerror(errno));
+            LOGE("mixed %s: %s:%lld не слушается: %s", jgets(in, "tag") ? jgets(in, "tag") : type, listen ? listen : "0.0.0.0", (long long)jgeti(in, "listen_port", 0), strerror(errno));
             continue;
         }
         struct mlist *m = calloc(1, sizeof *m);
