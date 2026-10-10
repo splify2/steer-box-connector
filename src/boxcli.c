@@ -23,8 +23,7 @@ int cmd_version(void) {
     if (!uname(&u)) arch = u.machine;
     const char *goarch = !strcmp(arch, "x86_64") ? "amd64"
                        : !strcmp(arch, "aarch64") ? "arm64"
-                       : !strncmp(arch, "arm", 3) ? "arm"
-                       : !strncmp(arch, "mips", 4) ? arch : arch;
+                       : !strncmp(arch, "arm", 3) ? "arm" : arch;
     int ext = !strcmp(s.variant, "extended");
     printf("sing-box version %s%s\n\n", s.sb_version, ext ? "-extended" : "");
     printf("Environment: steer-box-connector %s linux/%s\n", BOX_VERSION, goarch);

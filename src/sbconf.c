@@ -94,8 +94,7 @@ static void ck_err(struct ck *c, const struct jval *at, const char *fmt, ...) {
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
     if (!c->r->errors)
-        snprintf(c->r->first, sizeof c->r->first, "%s%s", buf,
-                 at && at->line ? "" : "");
+        snprintf(c->r->first, sizeof c->r->first, "%s", buf);
     c->r->errors++;
     if (at && at->line) LOGE("%s (строка %u)", buf, at->line);
     else LOGE("%s", buf);
