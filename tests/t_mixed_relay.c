@@ -1,6 +1,9 @@
-/* Проброс входа mixed: байты идут через splice (внутри ядра, без копирования в буфер процесса),
- * доходят целиком в обе стороны, и полузакрытие одной стороны не рвёт другую.
- * deps — всё, что тянет mixed.c, глушит --unresolved-symbols=ignore-all стенда. */
+/* Проброс входа mixed: объём идёт через splice (внутри ядра, без копирования в буфер процесса), короткие
+ * реплики — копией, без трубы; байты доходят целиком в обе стороны, и полузакрытие одной стороны не рвёт
+ * другую.
+ * Остальное, что тянет mixed.c, глушит --unresolved-symbols=ignore-all стенда; net.c — по-настоящему:
+ * копия пишет через write_all. */
+// deps: src/net.c tests/stub_log.c
 #include "../src/mixed.c"
 #include "check.h"
 #include <netinet/tcp.h>
@@ -78,8 +81,33 @@ int main(void) {
     CHECK((0) == (memcmp(got, down, N))); /* сервер → клиент: байт в байт */
 
     pthread_join(rt, NULL);
-    CHECK((1) == (g_relay_spliced >= (unsigned long)2 * N)); /* байты шли через splice, а не через буфер процесса */
+    /* Объём — через splice: копией только первые порции каждого направления, пока буфер не заполнился. */
+    CHECK((1) == (g_relay_spliced >= (unsigned long)2 * N * 9 / 10)); /* поток в мегабайты шёл через splice */
+    CHECK((1) == (g_relay_spliced + g_relay_copied == (unsigned long)2 * N)); /* и ни байта мимо счёта */
 
+    close(client); close(a); close(b); close(server);
+
+    /* Короткие реплики — копией: запрос в 64 байта, ответ в 64, тысячу раз. Трубе тут делать нечего. */
+    tcp_pair(&client, &a);
+    tcp_pair(&b, &server);
+    struct rl r2 = { a, b };
+    g_relay_spliced = g_relay_copied = 0;
+    pthread_create(&rt, NULL, run_relay, &r2);
+    int bad = 0;
+    for (int k = 0; k < 1000; k++) {
+        unsigned char q[64], back[64];
+        memset(q, (unsigned char)k, sizeof q);
+        if (write(client, q, sizeof q) != (ssize_t)sizeof q) { bad++; break; }
+        if (read_all(server, back, sizeof back) != sizeof back || memcmp(back, q, sizeof q)) { bad++; break; }
+        if (write(server, back, sizeof back) != (ssize_t)sizeof back) { bad++; break; }
+        if (read_all(client, q, sizeof q) != sizeof q || memcmp(back, q, sizeof q)) { bad++; break; }
+    }
+    CHECK((0) == (bad)); /* тысяча реплик туда и обратно — байт в байт */
+    shutdown(client, SHUT_WR);
+    shutdown(server, SHUT_WR);
+    pthread_join(rt, NULL);             /* счётчики — после выхода проброса: он считает после записи */
+    CHECK((0) == ((long)g_relay_spliced)); /* короткие реплики — копией, без splice */
+    CHECK((1) == (g_relay_copied == 1000ul * 128)); /* все через копию */
     close(client); close(a); close(b); close(server);
     free(up); free(down); free(got);
     return T_DONE();

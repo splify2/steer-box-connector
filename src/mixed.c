@@ -20,8 +20,10 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <sys/epoll.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 
 struct mlist {
@@ -79,36 +81,68 @@ static void out_for_inbound(struct box_rt *rt, const char *tag, char *out, size_
 
 /* ---- проброс ---------------------------------------------------------------------------- */
 
-/* БЕЗ КОПИРОВАНИЯ В ПРОЦЕСС, когда ядро это умеет. Цикл read/write через буфер — два перехода
- * границы ядра и два копирования на каждые 32 КБ; на роутере под гигагерц это видно в загрузке
- * процессора. splice переставляет страницы через трубу внутри ядра (так же ходит мост Telegram в
- * ядре steer, tgws.c relay_splice_once). Труба одна на соединение: каждая порция выливается из
- * неё целиком, прежде чем браться за следующую, поэтому направления в ней не смешиваются. Трубу
- * завести не вышло или ядро на этой паре splice не умеет (EINVAL) — прежний путь через буфер. */
+/* Мелкое — копией, объём — без копирования в процесс.
+ *
+ * splice переставляет страницы через трубу внутри ядра (так же ходит мост Telegram в ядре steer,
+ * tgws.c relay_splice_once): на потоке в мегабайты это вдвое меньше процессора (0,67 → 0,32 с/ГиБ на
+ * стенде). Но на короткой реплике — запрос в 64 байта и ответ — труба лишняя: два splice через неё
+ * дороже одного read и одного write, а реплика ждёт каждую микросекунду (обмен 64 байтами через вход
+ * mixed — то, чем меряют задержку прокси). Поэтому каждое направление начинает копией, и только
+ * чтение, заполнившее буфер целиком, — признак объёма — переводит его на splice; splice, принёсший
+ * меньше RELAY_SMALL, возвращает назад. Труба заводится, только когда объём пошёл: соединению с
+ * короткими репликами она не нужна вовсе. Ядро на этой паре splice не умеет (EINVAL) или трубы не
+ * дали — копией до конца.
+ *
+ * TCP_NODELAY — на обе стороны: исходящей его ставит net_connect, принятой — здесь. Без него ответ
+ * клиенту ждал бы подтверждения прошлого (Nagle), а прокси пересылает уже собранные порции, и копить
+ * ему нечего. */
 #define RELAY_CHUNK 65536
+#define RELAY_BULK 32768
+#define RELAY_SMALL 4096
+/* Ответ ближнего собеседника (локальная сеть, loopback) приходит за десятки микросекунд, а уснувший
+ * на poll поток будится дороже самого ответа: на ВМ с 64-байтовым обменом через вход — 36 мкс против
+ * 49. Поэтому после пересланной порции поток до RELAY_SPIN_NS опрашивает дескрипторы без сна. Дальний
+ * собеседник (интернет, миллисекунды) в этот срок не отвечает — тогда следующие RELAY_SPIN_SKIP кругов
+ * без опроса, и на таком соединении лишнее съедает не больше одной пробы на 17 порций. Простаивающее
+ * соединение не опрашивает вовсе: проба — только вслед за пересланной порцией. */
+#define RELAY_SPIN_NS 25000
+#define RELAY_SPIN_SKIP 16
 static unsigned long g_relay_spliced;   /* сколько байт прошло через splice — для стенда */
+static unsigned long g_relay_copied;    /* сколько копией — для стенда */
 
+static long long g_spin_ns = RELAY_SPIN_NS;
+static long long now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000000000LL + t.tv_nsec; }
 static void relay(int a, int b) {
-    char buf[32768];
+    char buf[RELAY_BULK];
     struct pollfd p[2] = { { a, POLLIN, 0 }, { b, POLLIN, 0 } };
     int open_a = 1, open_b = 1;
     int pp[2] = { -1, -1 };
-    int use_splice = pipe(pp) == 0;
-    if (use_splice) fcntl(pp[0], F_SETPIPE_SZ, RELAY_CHUNK);
+    int can_splice = 1;
+    int bulk[2] = { 0, 0 };
+    int one = 1, active = 0, skip = 0;
+    setsockopt(a, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    setsockopt(b, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     while (open_a || open_b) {
         p[0].events = open_a ? POLLIN : 0;
         p[1].events = open_b ? POLLIN : 0;
         /* Простой без трафика пять минут — соединение мертво (как udp_timeout sing-box для TCP
          * не бывает, но зависший сервер держал бы поток вечно). */
-        int r = poll(p, 2, 300000);
+        int r = 0;
+        if (g_spin_ns && active && !skip) {
+            long long end = now_ns() + g_spin_ns;
+            do r = poll(p, 2, 0); while (r == 0 && now_ns() < end);
+            if (r == 0) skip = RELAY_SPIN_SKIP;      /* не дождались — пауза до следующей пробы */
+        } else if (skip) skip--;
+        active = 0;
+        if (r <= 0) r = poll(p, 2, 300000);
         if (r <= 0) break;
         for (int i = 0; i < 2; i++) {
             if (!(p[i].revents & (POLLIN | POLLHUP | POLLERR))) continue;
             int from = i ? b : a, to = i ? a : b;
             ssize_t n;
-            if (use_splice) {
+            if (bulk[i] && can_splice) {
                 n = splice(from, NULL, pp[1], NULL, RELAY_CHUNK, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-                if (n < 0 && errno == EINVAL) { use_splice = 0; continue; }   /* не умеет — буфер */
+                if (n < 0 && errno == EINVAL) { can_splice = 0; continue; }   /* не умеет — копией */
                 if (n < 0 && (errno == EAGAIN || errno == EINTR)) continue;
                 if (n > 0) {
                     /* Вылить порцию целиком, блокирующе: байты уже в трубе, «потом» — значит
@@ -120,14 +154,24 @@ static void relay(int a, int b) {
                         left -= w;
                     }
                     g_relay_spliced += (unsigned long)n;
+                    active = 1;
+                    if (n < RELAY_SMALL) bulk[i] = 0;   /* объём кончился — снова копией */
                     continue;
                 }
             } else {
                 n = read(from, buf, sizeof buf);
                 if (n > 0) {
                     if (write_all(to, buf, (size_t)n)) goto out;
+                    g_relay_copied += (unsigned long)n;
+                    active = 1;
+                    if (n == (ssize_t)sizeof buf && can_splice) {
+                        /* Буфер полон — пошёл объём: дальше без копирования, трубу — сейчас. */
+                        if (pp[0] < 0 && pipe(pp) == 0) fcntl(pp[0], F_SETPIPE_SZ, RELAY_CHUNK);
+                        if (pp[0] >= 0) bulk[i] = 1; else can_splice = 0;
+                    }
                     continue;
                 }
+                if (n < 0 && (errno == EAGAIN || errno == EINTR)) continue;
             }
             shutdown(to, SHUT_WR);
             if (i) open_b = 0; else open_a = 0;
