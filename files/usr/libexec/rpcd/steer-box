@@ -15,6 +15,8 @@
 . "${JSHN_SH:-/usr/share/libubox/jshn.sh}"
 OPENWRT_RELEASE=${OPENWRT_RELEASE:-/etc/openwrt_release}
 SING_BOX=${SING_BOX:-/usr/bin/sing-box}
+STEER_INIT=${STEER_INIT:-/etc/init.d/steer}
+STEER_SPEC_DIR=${STEER_SPEC_DIR:-/etc/steer}
 
 REPO=splify2/steer
 # Перечень выпусков splify2/releases — три адреса одного version.json, по порядку. Он ПЕРВЫЙ
@@ -248,6 +250,12 @@ call)
 		case "$ver" in
 		''|*[!0-9.]*) json_add_boolean ok 0; json_add_string error "в версии допустимы только цифры и точки"; json_dump; exit 0 ;;
 		esac
+		# Служба steer со своей спекой (человек настроил сам) делит таблицы с коннектором: отказ до загрузки.
+		if [ -x "$STEER_INIT" ] && "$STEER_INIT" enabled >/dev/null 2>&1 && { [ -f "$STEER_SPEC_DIR/spec.json" ] || [ -f "$STEER_SPEC_DIR/spec.yaml" ]; }; then
+			json_add_boolean ok 0
+			json_add_string error "служба steer со своей спекой в $STEER_SPEC_DIR; остановите и отключите её ($STEER_INIT stop && $STEER_INIT disable) или уберите $STEER_SPEC_DIR/spec.*"
+			json_dump; exit 0
+		fi
 		if [ -z "$pkgs" ]; then
 			pkgs=$("$SING_BOX" -c "$CONF" box-needs 2>/dev/null | jsonfilter -e '@[*]')
 			[ -n "$pkgs" ] || pkgs=steer-core
@@ -310,9 +318,9 @@ call)
 $out"
 		rm -f $files
 		# Свой steerd у коннектора: служба steer без спеки ему мешает (те же таблицы).
-		if [ -x /etc/init.d/steer ] && [ ! -f /etc/steer/spec.json ] && [ ! -f /etc/steer/spec.yaml ]; then
-			/etc/init.d/steer stop >/dev/null 2>&1
-			/etc/init.d/steer disable >/dev/null 2>&1
+		if [ -x "$STEER_INIT" ] && [ ! -f "$STEER_SPEC_DIR/spec.json" ] && [ ! -f "$STEER_SPEC_DIR/spec.yaml" ]; then
+			"$STEER_INIT" stop >/dev/null 2>&1
+			"$STEER_INIT" disable >/dev/null 2>&1
 		fi
 		[ "$rc" = 0 ] && pgrep -f '^/usr/bin/sing-box ' >/dev/null 2>&1 && /etc/init.d/sing-box restart >/dev/null 2>&1
 		json_add_boolean ok "$([ "$rc" = 0 ] && echo 1 || echo 0)"

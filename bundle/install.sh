@@ -27,6 +27,17 @@ for p in $PKGS; do
 	files="$files ./$f"
 done
 
+# Служба steer со своей спекой (её настроил человек): коннектор ведёт ядро своим экземпляром, и
+# две службы делят таблицы. Отказ — до остановки forkop и podkop и до установки.
+STEER_INIT="${STEER_INIT:-/etc/init.d/steer}"
+STEER_SPEC_DIR="${STEER_SPEC_DIR:-/etc/steer}"
+if [ -x "$STEER_INIT" ] && "$STEER_INIT" enabled 2>/dev/null &&
+   { [ -f "$STEER_SPEC_DIR/spec.json" ] || [ -f "$STEER_SPEC_DIR/spec.yaml" ]; }; then
+	echo "Служба steer со своей спекой в $STEER_SPEC_DIR: остановите и отключите её ($STEER_INIT stop && $STEER_INIT disable) или уберите $STEER_SPEC_DIR/spec.*. Ничего не установлено."
+	exit 1
+fi
+echo "Обновление forkop или podkop и sysupgrade могут вернуть прежний sing-box из фида: после них запустите sh install.sh заново."
+
 # Работающие forkop и podkop — остановить на время установки и запустить обратно после неё.
 # Менеджер пакетов качает зависимости из фидов по ходу транзакции, а как только он снимает
 # sing-box из фида, правила forkop или podkop оставляют сам роутер без сети: следующие пакеты

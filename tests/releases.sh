@@ -114,7 +114,7 @@ printf "DISTRIB_ARCH='x86_64'\n" > "$T/openwrt_release"
 
 rpcd() {  # МЕТОД [ВХОД]
     printf '%s\n' "${2:-}" | env T="$T" PATH="$T/bin:$PATH" JSHN_SH="$ROOT/tests/stub/jshn.sh" \
-        OPENWRT_RELEASE="$T/openwrt_release" APK_WORLD="$T/apk.world" APK_DB="$T/apk.db" ${SHA256SUM:+SHA256SUM="$SHA256SUM"} SING_BOX="$T/bin/sing-box" sh "$RPCD" call "$1" 2>"$T/stderr"
+        OPENWRT_RELEASE="$T/openwrt_release" APK_WORLD="$T/apk.world" APK_DB="$T/apk.db" ${SHA256SUM:+SHA256SUM="$SHA256SUM"} SING_BOX="$T/bin/sing-box" STEER_INIT="$T/init-steer" STEER_SPEC_DIR="$T/steerdir" sh "$RPCD" call "$1" 2>"$T/stderr"
 }
 jget() { python3 -c 'import json,sys
 d=json.load(sys.stdin); v=d.get(sys.argv[1])
@@ -336,6 +336,55 @@ PATH="$T/bin:$PATH" APK_WORLD="$T/apk.world" APK_DB="$T/apk.db" pkg_world_heal "
 check "bundle/install.sh: лечение world — ядро «именем», коннектор без пакета убран, чужое цело" \
       "steer-core zapret><QgoodZapretGoodZapretGoodZapretG=" "$(tr '\n' ' ' < "$T/apk.world" | sed 's/ $//')"
 rm -f "$T/apk.world" "$T/apk.db"
+
+# Служба steer человека: со своей спекой и enabled install отказывает до загрузки и apk; без спеки
+# служба останавливается и выключается. Заглушка init пишет вызовы в $T/init.log.
+cat > "$T/init-steer" <<'EOF2'
+#!/bin/sh
+echo "$1" >> "$T/init.log"
+[ "$1" = enabled ] && [ -f "$T/init.enabled" ] && exit 0
+[ "$1" = enabled ] && exit 1
+exit 0
+EOF2
+chmod +x "$T/init-steer"
+mkdir -p "$T/steerdir"
+reset; : > "$T/init.log"; touch "$T/init.enabled"; echo '{}' > "$T/steerdir/spec.json"
+put "$RAW" "$T/version.json"; put "$REL/steer-v2.0.0/$CORE" "GOOD-$CORE"
+out="$(T="$T" rpcd install '{"version":"2.0.0","packages":["steer-core"]}')"
+check "install со спекой и enabled: отказ с причиной, apk и сеть не тронуты" "false;1;0;0" \
+      "$(printf '%s' "$out" | jget ok);$(printf '%s' "$out" | jget error | grep -c 'своей спекой');$(grep -c . "$T/apk.log");$(grep -c . "$T/curl.log")"
+check "  stop и disable не вызывались" "0" "$(grep -c '^stop$\|^disable$' "$T/init.log")"
+rm -f "$T/steerdir/spec.json"; : > "$T/init.log"; : > "$T/curl.log"
+put "$RAW" "$T/version.json"; put "$REL/steer-v2.0.0/$CORE" "GOOD-$CORE"
+out="$(T="$T" rpcd install '{"version":"2.0.0","packages":["steer-core"]}')"
+check "install без спеки: ok, служба остановлена и выключена" "true;stop disable" \
+      "$(printf '%s' "$out" | jget ok);$(grep '^stop$\|^disable$' "$T/init.log" | tr '\n' ' ' | sed 's/ $//')"
+rm -f "$T/init.enabled"; echo '{}' > "$T/steerdir/spec.yaml"; : > "$T/init.log"
+put "$RAW" "$T/version.json"; put "$REL/steer-v2.0.0/$CORE" "GOOD-$CORE"
+out="$(T="$T" rpcd install '{"version":"2.0.0","packages":["steer-core"]}')"
+check "install со спекой, служба выключена: ставится, служба не тронута" "true;0" \
+      "$(printf '%s' "$out" | jget ok);$(grep -c '^stop$\|^disable$' "$T/init.log")"
+
+# postinst пакета: со спекой службу не трогает, без спеки — стоп и disable.
+PI="$ROOT/scripts/postinst"
+run_pi() { T="$T" STEER_INIT="$T/init-steer" STEER_SPEC_DIR="$T/steerdir" SING_BOX_INIT="$T/none" PATH="$T/bin:$PATH" sh "$PI" >"$T/pi.out" 2>&1; }
+: > "$T/init.log"; run_pi
+check "postinst со спекой: stop и disable не вызваны, сообщение есть" "0;1" \
+      "$(grep -c '^stop$\|^disable$' "$T/init.log");$(grep -c 'своей спекой' "$T/pi.out")"
+rm -f "$T/steerdir/spec.yaml"; : > "$T/init.log"; run_pi
+check "postinst без спеки: stop и disable" "stop disable" "$(tr '\n' ' ' < "$T/init.log" | sed 's/ $//')"
+# Перезапуск sing-box: коннектор не поднялся — сообщение с командой запуска.
+cat > "$T/sb-init" <<'EOF2'
+#!/bin/sh
+case "$1" in running) [ -f "$T/sb.up" ] && exit 0; exit 1 ;; restart) rm -f "$T/sb.up"; exit 0 ;; esac
+EOF2
+chmod +x "$T/sb-init"; touch "$T/sb.up"
+T="$T" STEER_INIT="$T/none" SING_BOX_INIT="$T/sb-init" sh "$PI" >"$T/pi.out" 2>&1
+check "postinst: sing-box не стартовал после restart — сообщение" "1" "$(grep -c 'sb-init start' "$T/pi.out")"
+
+# bundle/install.sh: тот же отказ — до остановки forkop/podkop и до apk.
+check "bundle/install.sh: отказ про службу steer стоит до остановки forkop и apk" "1" \
+      "$(awk '/своей спекой/ {a=NR} /Останавливаю/ {b=NR} END {print (a && b && a < b) ? 1 : 0}' "$ROOT/bundle/install.sh")"
 
 [ "$fails" -eq 0 ] && echo "все проверки прошли" || echo "ПРОВАЛОВ: $fails"
 [ "$fails" -eq 0 ]
