@@ -119,7 +119,7 @@ int rt_egress(struct box_rt *rt, const char *tag, struct egress *eg, char *err, 
     }
     if (k == SBO_REMARK) {
         const struct jval *m = jget(ob, "routing_mark");
-        eg->mark = m->t == J_NUM ? (uint32_t)m->i : (uint32_t)strtoul(m->s, NULL, 0);
+        eg->mark = m->t == J_NUM ? (uint32_t)m->i : m->t == J_STR && m->s ? (uint32_t)strtoul(m->s, NULL, 0) : 0;
         return 0;
     }
     const char *name = rt_steer_name(rt, tag);
@@ -634,7 +634,7 @@ int rt_select(struct box_rt *rt, const char *selector, const char *member,
 static void apply_cfg_globals(struct box_rt *rt, const struct jval *cfg) {
     const struct jval *route = jget(cfg, "route");
     const struct jval *m = jget(route, "default_mark");
-    rt->default_mark = !m ? 0 : m->t == J_NUM ? (uint32_t)m->i : (uint32_t)strtoul(m->s, NULL, 0);
+    rt->default_mark = !m ? 0 : m->t == J_NUM ? (uint32_t)m->i : m->t == J_STR && m->s ? (uint32_t)strtoul(m->s, NULL, 0) : 0;
     const char *di = jgets(route, "default_interface");
     snprintf(rt->default_dev, sizeof rt->default_dev, "%s", di ? di : "");
     enum box_level lv;

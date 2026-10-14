@@ -24,7 +24,7 @@ static int egress_for(const struct jval *cfg, const char *tag, struct egress *eg
     memset(eg, 0, sizeof *eg);
     const struct jval *route = jget(cfg, "route");
     const struct jval *m = jget(route, "default_mark");
-    if (m) eg->mark = m->t == J_NUM ? (uint32_t)m->i : (uint32_t)strtoul(m->s, NULL, 0);
+    if (m) eg->mark = m->t == J_NUM ? (uint32_t)m->i : m->t == J_STR && m->s ? (uint32_t)strtoul(m->s, NULL, 0) : 0;
     if (!tag) tag = jgets(route, "final");
     const struct jval *ob = tag ? sb_outbound(cfg, tag) : NULL;
     if (!ob) return 0;
@@ -40,7 +40,7 @@ static int egress_for(const struct jval *cfg, const char *tag, struct egress *eg
     }
     if (k == SBO_REMARK) {
         const struct jval *rm = jget(ob, "routing_mark");
-        eg->mark = rm->t == J_NUM ? (uint32_t)rm->i : (uint32_t)strtoul(rm->s, NULL, 0);
+        eg->mark = rm->t == J_NUM ? (uint32_t)rm->i : rm->t == J_STR && rm->s ? (uint32_t)strtoul(rm->s, NULL, 0) : 0;
         return 0;
     }
     struct box_settings s;
@@ -115,7 +115,7 @@ static struct dnsup *fetch_up(const struct jval *cfg, const char *tag, int depth
     struct dnsup *res = rtag && strcmp(rtag, tag) ? fetch_up(cfg, rtag, depth + 1) : NULL;
     struct egress eg = { .dev = "", .mark = 0 };
     const struct jval *m = jget(jget(cfg, "route"), "default_mark");
-    if (m) eg.mark = m->t == J_NUM ? (uint32_t)m->i : (uint32_t)strtoul(m->s, NULL, 0);
+    if (m) eg.mark = m->t == J_NUM ? (uint32_t)m->i : m->t == J_STR && m->s ? (uint32_t)strtoul(m->s, NULL, 0) : 0;
     return dnsup_new(NULL, sv, &eg, res);
 }
 
