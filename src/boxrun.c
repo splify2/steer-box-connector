@@ -198,6 +198,7 @@ static void status_tick(struct ev *ev, void *arg) {
 struct neut { int v6; char mark[48]; unsigned pref; };
 static struct neut g_neut[16];
 static size_t g_neut_n;
+static int g_neut_full;      /* о переполнении g_neut уже сказано */
 
 static int run_cmd(const char *const argv[], char *out, size_t outn) {
     int pfd[2];
@@ -229,7 +230,8 @@ static void neutralize_family(struct box_rt *rt, int v6) {
     const char *fam = v6 ? "-6" : "-4";
     const char *list[] = { "ip", fam, "rule", "show", NULL };
     if (run_cmd(list, buf, sizeof buf)) return;
-    for (char *line = strtok(buf, "\n"); line; line = strtok(NULL, "\n")) {
+    char *sv = NULL;
+    for (char *line = strtok_r(buf, "\n", &sv); line; line = strtok_r(NULL, "\n", &sv)) {
         unsigned pref;
         char mark[48], table[64];
         const char *fm = strstr(line, "fwmark ");
@@ -246,7 +248,15 @@ static void neutralize_family(struct box_rt *rt, int v6) {
         int have = 0;
         for (size_t i = 0; i < g_neut_n; i++)
             if (g_neut[i].v6 == v6 && !strcmp(g_neut[i].mark, mark)) have = 1;
-        if (have || g_neut_n >= sizeof g_neut / sizeof g_neut[0]) continue;
+        if (have) continue;
+        if (g_neut_n >= sizeof g_neut / sizeof g_neut[0]) {
+            if (!g_neut_full) {
+                g_neut_full = 1;
+                LOGW("меток tproxy соседа больше %zu: метка %s (таблица %s) оставлена без правила в main",
+                     sizeof g_neut / sizeof g_neut[0], mark, table);
+            }
+            continue;
+        }
         char p[16];
         snprintf(p, sizeof p, "%u", rt->set.rule_pref + 1);
         const char *add[] = { "ip", fam, "rule", "add", "fwmark", mark, "lookup", "main", "pref", p, NULL };
@@ -275,6 +285,7 @@ static void neutralize_undo(void) {
         run_cmd(del, NULL, 0);
     }
     g_neut_n = 0;
+    g_neut_full = 0;
 }
 
 static void neut_tick(struct ev *ev, void *arg) {
@@ -330,7 +341,8 @@ int box_validate_spec(const struct box_settings *set, const char *spec, const ch
     if (WIFEXITED(st) && WEXITSTATUS(st) == 0) return 0;
     /* Первая строка отказа — она и есть причина («…: clients.router.self: …»). */
     char *line = buf;
-    for (char *p = strtok(buf, "\n"); p; p = strtok(NULL, "\n"))
+    char *sv = NULL;
+    for (char *p = strtok_r(buf, "\n", &sv); p; p = strtok_r(NULL, "\n", &sv))
         if (strstr(p, "steer") || strstr(p, ":")) { line = p; break; }
     snprintf(err, errn, "%s", *line ? line : "apply --dry-run завершился отказом");
     return -1;
@@ -456,7 +468,8 @@ static int lan_devices(const char **out, int max) {
     };
     for (size_t c = 0; c < 2 && !n; c++) {
         if (run_cmd(cmds[c], buf, sizeof buf)) continue;
-        for (char *t = strtok(buf, " \n"); t && n < max; t = strtok(NULL, " \n")) out[n++] = t;
+        char *sv = NULL;
+        for (char *t = strtok_r(buf, " \n", &sv); t && n < max; t = strtok_r(NULL, " \n", &sv)) out[n++] = t;
     }
     return n;
 }
