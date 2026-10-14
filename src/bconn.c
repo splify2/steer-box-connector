@@ -279,6 +279,29 @@ static const char *g_ua;
 
 void http_set_user_agent(const char *ua) { g_ua = ua; }
 
+/* Куда ведёт Location из ответа на запрос path к hosthdr: полный адрес — как есть, но не с
+ * https на http; «/путь» — от того же хоста; без «/» — от каталога текущего пути (не адрес). */
+static int redirect_target(char *cur, size_t curn, int tls, const char *hosthdr, const char *path,
+                           const char *location, char *err, size_t errn) {
+    const char *scheme = tls ? "https" : "http";
+    if (!strncasecmp(location, "https://", 8)) {
+        snprintf(cur, curn, "%s", location);
+    } else if (!strncasecmp(location, "http://", 7)) {
+        if (tls) { snprintf(err, errn, "понижение https → http в переадресации запрещено"); return -1; }
+        snprintf(cur, curn, "%s", location);
+    } else if (location[0] == '/' && location[1] == '/') {
+        snprintf(cur, curn, "%s:%s", scheme, location);
+    } else if (location[0] == '/') {
+        snprintf(cur, curn, "%s://%s%s", scheme, hosthdr, location);
+    } else {
+        size_t dl = strcspn(path, "?#");
+        while (dl && path[dl - 1] != '/') dl--;
+        if (!dl) dl = 1;
+        snprintf(cur, curn, "%s://%s%.*s%s", scheme, hosthdr, (int)dl, path[0] == '/' ? path : "/", location);
+    }
+    return 0;
+}
+
 int http_get(const char *url, const struct egress *eg, int timeout_ms, size_t max_body,
              unsigned char **out, size_t *outn, int *status, char *err, size_t errn) {
     char cur[2048];
@@ -329,11 +352,7 @@ int http_get(const char *url, const struct egress *eg, int timeout_ms, size_t ma
         }
         if (r.status >= 300 && r.status < 400 && location[0]) {
             bconn_close(&c);
-            if (location[0] == '/') {
-                char base[400];
-                snprintf(base, sizeof base, "%s://%s", tls ? "https" : "http", hosthdr);
-                snprintf(cur, sizeof cur, "%s%s", base, location);
-            } else snprintf(cur, sizeof cur, "%s", location);
+            if (redirect_target(cur, sizeof cur, tls, hosthdr, path, location, err, errn)) return -1;
             continue;
         }
         size_t cap = 0, n = 0;
