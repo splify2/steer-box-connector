@@ -23,10 +23,13 @@
 #include <sys/stat.h>
 #include <utime.h>
 
+struct tick;
+
 struct rset {
     char tag[200], url[1024], path[700], format[16], detour[160];
     long long interval_ms;
     uint64_t timer;
+    struct tick *tk;             /* состояние ожидающего таймера: tick_cb или rs_stop освобождает */
     int busy;
 };
 
@@ -176,6 +179,7 @@ static void tick_cb(struct ev *ev, void *arg) {
     (void)ev;
     struct tick *t = arg;
     struct rsmgr *m = t->m;
+    if (t->i < m->n) m->v[t->i].tk = NULL;
     if (!m->stopped && t->i < m->n) {
         m->v[t->i].timer = 0;
         start_dl(m, t->i);
@@ -193,6 +197,7 @@ static void schedule(struct rsmgr *m, size_t i, long long ms) {
     /* Таймер цикла — до суток с лишним; дольше (876000h у forkop — «не обновлять») — просто
      * не ставится. */
     if (ms > 30LL * 86400000) { m->refs--; free(t); return; }
+    m->v[i].tk = t;
     m->v[i].timer = ev_timer(m->rt->ev, (long)ms, tick_cb, t);
 }
 
@@ -290,6 +295,8 @@ void rs_stop(struct box_rt *rt) {
         if (m->v[i].timer) {
             ev_timer_cancel(rt->ev, m->v[i].timer);
             m->refs--;                     /* ссылка отменённого таймера */
+            free(m->v[i].tk);              /* tick_cb уже не придёт */
+            m->v[i].tk = NULL;
         }
     if (m->debounce) { ev_timer_cancel(rt->ev, m->debounce); m->debounce = 0; m->refs--; }
     if (m->ino >= 0) { ev_del(rt->ev, m->ino); close(m->ino); }

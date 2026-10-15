@@ -457,6 +457,9 @@ static void ck_route(struct ck *c, const struct jval *route) {
             " default_interface default_mark default_domain_resolver default_network_strategy"
             " default_network_type default_fallback_network_type default_fallback_delay find_process"
             " geoip geosite");
+    struct jval *dm = jget(route, "default_mark");
+    if (dm && !(dm->t == J_NUM && dm->is_int) && dm->t != J_STR)
+        ck_err(c, dm, "route.default_mark: число или строка 0x…");
     const char *fin = jgets(route, "final");
     if (fin) ck_outref(c, jget(route, "final"), fin, "route.final");
     struct jval *dr = jget(route, "default_domain_resolver");
