@@ -31,6 +31,13 @@ steer-box-connector @VERSION@ — тестовый набор
 /etc/init.d/steer enable && /etc/init.d/steer start (пакеты steer-* при удалении коннектора
 остаются).
 
+Если служба steer включена и у неё своя спека в /etc/steer (spec.json или spec.yaml), установка
+отказывает, ничего не меняя: остановите и отключите службу (/etc/init.d/steer stop &&
+/etc/init.d/steer disable) или уберите /etc/steer/spec.*, затем запустите sh install.sh заново.
+Обновление forkop или podkop и sysupgrade могут вернуть пакет sing-box из фида вместо коннектора, а
+enabled в /etc/config/sing-box — в прежнее значение: после них проверьте sing-box version и при
+необходимости запустите sh install.sh заново.
+
 Страница: LuCI → Services → Steer Connector. На ней — состояние, какие пакеты steer нужны
 текущему конфигу (и их установка), каким sing-box представляться (вариант и версия: forkop
 смотрит на extended, podkop требует не ниже 1.12.4), уровень журнала, поле метки и приоритет

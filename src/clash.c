@@ -955,7 +955,15 @@ static void traffic_now(struct box_rt *rt, unsigned long long *up, unsigned long
         if (!dev) continue;
         int dup = 0;
         for (int k = 0; k < ns; k++) if (!strcmp(seen[k], dev)) dup = 1;
-        if (dup || ns >= 64) continue;
+        if (dup) continue;
+        if (ns >= 64) {
+            static int warned;
+            if (!warned) {
+                warned = 1;
+                LOGW("выходов steer с разными устройствами больше 64: устройство %s не входит в счётчик трафика", dev);
+            }
+            continue;
+        }
         seen[ns++] = dev;
         *up += dev_bytes(dev, "tx_bytes");
         *down += dev_bytes(dev, "rx_bytes");

@@ -2,13 +2,16 @@
 [ -n "${IPKG_INSTROOT}" ] && exit 0
 # Правило forward в туннели (usr/share/nftables.d) fw4 подхватывает при перезагрузке.
 [ -x /sbin/fw4 ] && fw4 -q reload 2>/dev/null
-# Движок теперь ведёт коннектор своим экземпляром: служба steer — стоп и без автозапуска. Её
-# спека (если есть) остаётся на месте; вернуть службу — /etc/init.d/steer enable && start.
-if [ -x /etc/init.d/steer ]; then
-	/etc/init.d/steer stop 2>/dev/null
-	/etc/init.d/steer disable 2>/dev/null
-	if [ -f /etc/steer/spec.json ] || [ -f /etc/steer/spec.yaml ]; then
-		echo "steer-box-connector: служба steer выключена — ядро ведёт коннектор; спека в /etc/steer сохранена"
+# Движок теперь ведёт коннектор своим экземпляром: служба steer без своей спеки — стоп и без
+# автозапуска. Со спекой (её настроил человек) службу не трогаем: только сообщение.
+STEER_INIT="${STEER_INIT:-/etc/init.d/steer}"
+STEER_SPEC_DIR="${STEER_SPEC_DIR:-/etc/steer}"
+if [ -x "$STEER_INIT" ]; then
+	if [ -f "$STEER_SPEC_DIR/spec.json" ] || [ -f "$STEER_SPEC_DIR/spec.yaml" ]; then
+		echo "steer-box-connector: служба steer со своей спекой в $STEER_SPEC_DIR оставлена как есть; если коннектор не стартует, остановите её ($STEER_INIT stop && $STEER_INIT disable) или уберите $STEER_SPEC_DIR/spec.*"
+	else
+		"$STEER_INIT" stop 2>/dev/null
+		"$STEER_INIT" disable 2>/dev/null
 	fi
 fi
 # Методы ubus страницы (rpcd: /usr/libexec/rpcd/steer-box) rpcd читает при старте — без
@@ -16,7 +19,10 @@ fi
 # rpcd, и перезапуск оборвал бы её ответ.
 [ -x /etc/init.d/rpcd ] && ( sleep 2; /etc/init.d/rpcd restart ) >/dev/null 2>&1 &
 # Запущенный sing-box (podkop или forkop уже работает) — перезапустить новой версией.
-if [ -x /etc/init.d/sing-box ] && /etc/init.d/sing-box running 2>/dev/null; then
-	/etc/init.d/sing-box restart 2>/dev/null
+SING_BOX_INIT="${SING_BOX_INIT:-/etc/init.d/sing-box}"
+if [ -x "$SING_BOX_INIT" ] && "$SING_BOX_INIT" running 2>/dev/null; then
+	"$SING_BOX_INIT" restart 2>/dev/null
+	"$SING_BOX_INIT" running 2>/dev/null ||
+		echo "steer-box-connector: коннектор после перезапуска не работает — $SING_BOX_INIT start"
 fi
 exit 0
