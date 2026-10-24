@@ -64,9 +64,12 @@ enabled в /etc/config/sing-box — в прежнее значение: посл
       «Счётчики правил proxy» — счётчик forkop стоит за tproxy, а прозрачного сокета нет
       (коннектор работает без TPROXY), поэтому он всегда 0;
       «Найдены дополнительные правила маркировки» — это таблица inet sbox ядра steer.
-  - Пока не переводится: действие reject и блокировка QUIC, выход через routing_mark zapret,
+  - reject и reject protocol quic (отключение QUIC) переводятся в вид block ядра steer 2.1.0; на
+    ядре старше правила с reject снимаются с предупреждением. Для имён и наборов отказ QUIC не
+    переводится (block глушит имена целиком).
+  - Пока не переводится: выход через routing_mark zapret,
     multiplex, серверный режим forkop (кроме сервера socks), `sing-box generate tls-keypair`,
-    `sing-box rule-set compile`. О первых трёх коннектор предупреждает в журнале при запуске.
+    `sing-box rule-set compile`. О routing_mark и multiplex коннектор предупреждает в журнале при запуске.
     Плагины shadowsocks, транспорт quic (V2Ray), выходы других типов (tuic, anytls, shadowtls,
     wireguard…) и прежняя запись сервера DNS через address — sing-box check отказывает, и
     служба не стартует. Серверы DNS quic и h3 (DoQ, DoH3) не ведутся. С сервером forkop

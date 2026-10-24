@@ -33,7 +33,7 @@ mixed. Сами podkop и forkop не меняются и ставятся из 
 
 ## Пока не умеет
 
-- действие `reject` и блокировку QUIC;
+- `reject protocol quic` для доменов и наборов правил, `reject` с `protocol`, кроме quic (см. ниже);
 - выход direct с `routing_mark` (zapret у forkop);
 - `multiplex` у выходов;
 - серверный режим forkop, кроме сервера socks;
@@ -41,7 +41,16 @@ mixed. Сами podkop и forkop не меняются и ставятся из 
   wireguard и прочие), прежнюю запись сервера DNS через `address`, серверы DNS `quic` и `h3`;
 - `sing-box generate tls-keypair` и `sing-box rule-set compile`.
 
-О первых трёх коннектор предупреждает в журнале при запуске: правила с reject и routing_mark он
+`reject` и выход `block` коннектор переводит в вид `block` ядра steer (нужно steer 2.1.0; коннектор
+спрашивает `steerd version`, и на ядре старше или с неразобранной версией правила с reject снимаются
+с предупреждением, как раньше). `reject` с `protocol: quic` — правило «UDP/443 в `block`» на своём месте
+в порядке (podkop и forkop при «отключить QUIC» пишут его без назначения — тогда отказ действует для всех
+адресов, с `source_ip_cidr` — для клиента, с `ip_cidr` — для подсетей). Не переводится, с предупреждением
+и причиной: `reject protocol quic` для доменов и наборов (block глушит имена целиком, а не один QUIC),
+`reject` или правило в `block` для имён с сужением порта и протокола, `reject protocol quic` с портом
+или network, кроме udp, `reject` с protocol, кроме quic.
+
+О routing_mark и multiplex коннектор предупреждает в журнале при запуске: правила с routing_mark он
 снимает, а соединения multiplex идут без него. Конфиг с плагином shadowsocks, транспортом quic,
 выходом другого типа или прежней записью DNS `sing-box check` не принимает — служба не стартует, и
 forkop или podkop показывает причину. С сервером

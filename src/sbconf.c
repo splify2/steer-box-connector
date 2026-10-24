@@ -711,7 +711,8 @@ static int check_with_steer(const struct jval *cfg) {
     snprintf(st, sizeof st, "%s/state", dir);
     snprintf(spec, sizeof spec, "%s/spec.json", dir);
     mkdir(st, 0700);
-    struct tr_opts to = { .dir = dir, .ruleset_dir = rs, .router_self = 1 };
+    struct tr_opts to = { .dir = dir, .ruleset_dir = rs, .router_self = 1,
+                          .block_ok = box_steerd_has_block(set.steerd) };
     struct tr_result res;
     box_log_level(BL_ERROR);
     int rc = box_translate(cfg, &to, &res, err, sizeof err);

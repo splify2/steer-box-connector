@@ -24,6 +24,7 @@ struct tr_opts {
     size_t lan_n;
     uint32_t egress_mark;          /* route.default_mark — метка своих сокетов steer (S8) */
     int router_self;               /* каналы на сам роутер (STEER_ROUTER_SELF): правила-двойники */
+    int block_ok;                  /* ядро умеет block и quic: block (steer 2.1.0): box_steer_has_block */
     const struct jval *selected;   /* выбор селекторов: тег селектора → тег члена (Clash API) */
 };
 
@@ -38,6 +39,11 @@ struct tr_result {
 int box_translate(const struct jval *cfg, const struct tr_opts *o, struct tr_result *res,
                   char *err, size_t errn);
 void box_translate_free(struct tr_result *res);
+
+/* Вывод `steerd version` («steer 2.1.0 (…)») — ядро с видом выхода block (2.1.0 и новее)? */
+int box_steer_has_block(const char *text);
+/* То же по установленному движку (boxrun.c): `steerd version`; нет движка — 0. */
+int box_steerd_has_block(const char *steerd);
 
 /* Узел выхода sing-box (vless, hysteria2, trojan…) строкой подписки steer — то, что перевод пишет в
  * файл подписки выхода. NULL — тип не переводится (причина в err). Освобождает вызывающий. */
