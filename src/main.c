@@ -276,6 +276,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "tools")) return cmd_tools(&o, nrest - 1, rest + 1);
     if (!strcmp(cmd, "box-needs")) return cmd_box_needs(&o);
     if (!strcmp(cmd, "box-translate")) return cmd_box_translate(&o, nrest - 1, rest + 1);
+    if (!strcmp(cmd, "box-report")) return cmd_box_report(&o, nrest - 1, rest + 1);
     if (!strcmp(cmd, "help") || !strcmp(cmd, "-h") || !strcmp(cmd, "--help")) { usage(); return 0; }
     if (!strcmp(cmd, "-v") || !strcmp(cmd, "--version")) return cmd_version();
     fprintf(stderr, "Error: unknown command \"%s\" for \"sing-box\"\n", cmd);

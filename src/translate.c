@@ -1,5 +1,6 @@
 /* Перевод конфига sing-box в спеку steer v2 — см. translate.h. */
 #define _GNU_SOURCE
+#include <ftw.h>
 #include "translate.h"
 #include "sbconf.h"
 #include "box.h"
@@ -9,6 +10,8 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
 #include <arpa/inet.h>
 
 /* Имя steer: буквы, цифры, «_», «-», «.», не длиннее 31 байта (name_ok и name[32] в
@@ -30,6 +33,7 @@ struct tr {
     struct names cnames;           /* клиенты */
     unsigned dev_seq, file_seq, rule_seq;
     unsigned warnings, missing_sets;
+    struct jval *report;           /* что не переводится: массив {where, why, instead, todo} */
     char *err;
     size_t errn;
     int failed;
@@ -43,15 +47,40 @@ struct tr {
     long override_port;            /* правило route-options: подмена порта у списков правила */
 };
 
+/* Предупреждение перевода — запись отчёта «что не переводится». Формат — четыре поля через RS:
+ *   где     путь в конфиге sing-box (route.rules[3], outbounds[tag=x], dns.servers[tag=y]);
+ *   почему  что именно steer не выражает;
+ *   вместо  что будет вместо этого (пропущено, заменено на …);
+ *   делать  что остаётся человеку.
+ * Запись идёт в журнал («перевод: где: почему — вместо. Что делать: …») и в t->report. */
+#define RS "\037"
+#define REPORT_MAX 200          /* записей в отчёте; счёт warnings идёт и дальше */
 static void tw(struct tr *t, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void tw(struct tr *t, const char *fmt, ...) {
-    char buf[600];
+    char buf[900];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
+    for (char *c = buf; *c; c++)
+        if ((unsigned char)*c < 0x20 && *c != RS[0]) *c = ' ';
+    char *f[4] = { buf, "", "", "" };
+    int n = 1;
+    for (char *c = buf; *c && n < 4; c++)
+        if (*c == RS[0]) { *c = 0; f[n++] = c + 1; }
+    for (char *c = f[3]; *c; c++)
+        if (*c == RS[0]) *c = ' ';
     t->warnings++;
-    LOGW("перевод: %s", buf);
+    LOGW("перевод: %s: %s — %s. Что делать: %s", f[0], f[1], f[2], f[3]);
+    if (t->report && t->report->len < REPORT_MAX) {
+        struct jval *e = jnew(J_OBJ);
+        if (!e) return;
+        jobj_set(e, "where", jstr(f[0]));
+        jobj_set(e, "why", jstr(f[1]));
+        jobj_set(e, "instead", jstr(f[2]));
+        jobj_set(e, "todo", jstr(f[3]));
+        jarr_push(t->report, e);
+    }
 }
 
 static int tfail(struct tr *t, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
@@ -255,7 +284,7 @@ static int narrow_from_rule(struct tr *t, const struct jval *r, struct narrow *n
         for (long i = 0; i < n && i < 4; i++) {
             if (!strcmp(l[i], "tcp")) nw->tcp = 1;
             else if (!strcmp(l[i], "udp")) nw->udp = 1;
-            else { tw(t, "%s: network «%s» не выражается", where, l[i]); return -1; }
+            else { tw(t, "%s" RS "network «%s» не выражается: steer понимает только tcp и udp" RS "правило пропущено" RS "укажите в network tcp или udp (или уберите условие)", where, l[i]); return -1; }
         }
         if (nw->tcp && nw->udp) nw->tcp = nw->udp = 0;
     }
@@ -263,9 +292,9 @@ static int narrow_from_rule(struct tr *t, const struct jval *r, struct narrow *n
     struct jval *port = jget(r, "port");
     for (size_t i = 0; port && i < (port->t == J_ARR ? port->len : 1); i++) {
         const struct jval *p = port->t == J_ARR ? port->a[i] : port;
-        if (p->t != J_NUM) { tw(t, "%s: port не число", where); return -1; }
+        if (p->t != J_NUM) { tw(t, "%s" RS "в port ожидается число, а там другое значение" RS "правило пропущено" RS "впишите порт числом", where); return -1; }
         j += (size_t)snprintf(nw->ports + j, sizeof nw->ports - j, "%s%lld", j ? "," : "", (long long)p->i);
-        if (j >= sizeof nw->ports) { tw(t, "%s: портов слишком много для одной строки", where); return -1; }
+        if (j >= sizeof nw->ports) { tw(t, "%s" RS "портов в правиле больше, чем помещается в одно условие steer" RS "правило пропущено" RS "разбейте правило на несколько с меньшим числом портов или задайте диапазон через port_range", where); return -1; }
     }
     struct jval *pr = jget(r, "port_range");
     long prn = pr ? jstrlist(pr, NULL, 0) : 0;
@@ -275,11 +304,11 @@ static int narrow_from_rule(struct tr *t, const struct jval *r, struct narrow *n
         jstrlist(pr, l, (size_t)prn);
         for (long i = 0; i < prn; i++) {
             const char *c = strchr(l[i], ':');
-            if (!c) { tw(t, "%s: port_range «%s» без «:»", where, l[i]); free(l); return -1; }
+            if (!c) { tw(t, "%s" RS "port_range «%s» записан без «:», а нужен вид от:до" RS "правило пропущено" RS "запишите диапазон как 1000:2000", where, l[i]); free(l); return -1; }
             long a = c == l[i] ? 1 : strtol(l[i], NULL, 10);
             long b = c[1] ? strtol(c + 1, NULL, 10) : 65535;
             j += (size_t)snprintf(nw->ports + j, sizeof nw->ports - j, "%s%ld-%ld", j ? "," : "", a, b);
-            if (j >= sizeof nw->ports) { free(l); tw(t, "%s: портов слишком много", where); return -1; }
+            if (j >= sizeof nw->ports) { free(l); tw(t, "%s" RS "портов в правиле больше, чем помещается в одно условие steer" RS "правило пропущено" RS "разбейте правило на несколько с меньшим числом портов или сузьте диапазоны", where); return -1; }
         }
         free(l);
     }
@@ -296,7 +325,7 @@ static int list_keys_ok(struct tr *t, const struct jval *r, const char *where) {
         for (int j = 0; ok[j]; j++)
             if (!strcmp(k, ok[j])) good = 1;
         if (!good) {
-            tw(t, "%s: условие «%s» в наборе ядро не выражает — правило набора снято", where, k);
+            tw(t, "%s" RS "условие «%s» в наборе ядро steer не выражает" RS "правило набора пропущено: его адреса и домены в списки не попали" RS "оставьте в правиле набора только домены, адреса, порты и сеть, а это условие вынесите в обычное правило маршрута", where, k);
             return 0;
         }
     }
@@ -368,10 +397,10 @@ static int collect_rules(struct tr *t, struct plist_set *ps, const struct jval *
         snprintf(w, sizeof w, "%s.rules[%zu]", where, i);
         const char *type = jgets(r, "type");
         if (type && !strcmp(type, "logical")) {
-            tw(t, "%s: логическое правило в наборе ядро не выражает — снято", w);
+            tw(t, "%s" RS "логическое правило (and/or) в наборе ядро steer не выражает" RS "правило набора пропущено: его адреса и домены в списки не попали" RS "разложите его на простые правила набора", w);
             continue;
         }
-        if (jgetb(r, "invert", 0)) { tw(t, "%s: invert в наборе ядро не выражает — снято", w); continue; }
+        if (jgetb(r, "invert", 0)) { tw(t, "%s" RS "инверсия (invert) в наборе ядро steer не выражает" RS "правило набора пропущено: его адреса и домены в списки не попали" RS "перепишите условие без инверсии или перенесите его в правило маршрута", w); continue; }
         if (!list_keys_ok(t, r, w)) continue;
         struct narrow nw;
         if (narrow_from_rule(t, r, &nw, w)) continue;
@@ -387,7 +416,7 @@ static int collect_rules(struct tr *t, struct plist_set *ps, const struct jval *
 static int narrow_merge(struct tr *t, struct narrow *dst, const struct narrow *rule, const char *where) {
     if (!rule->tcp && !rule->udp && !rule->ports[0]) return 0;
     if ((dst->tcp || dst->udp || dst->ports[0]) && !narrow_same(dst, rule)) {
-        tw(t, "%s: сужение правила поверх сужения набора не выражается — взято сужение правила", where);
+        tw(t, "%s" RS "и у набора, и у правила заданы сеть или порты, а steer совмещает только одно сужение" RS "взято сужение правила, сужение набора отброшено" RS "оставьте network и port либо в наборе, либо в правиле", where);
     }
     *dst = *rule;
     return 0;
@@ -449,7 +478,7 @@ static int collect_set(struct tr *t, struct plist_set *ps, const char *tag) {
     const char *format = jgets(rs, "format");
     if (!type) type = "inline";
     char where[260];
-    snprintf(where, sizeof where, "rule_set %s", tag);
+    snprintf(where, sizeof where, "route.rule_set[tag=%s]", tag);
     if (!strcmp(type, "inline")) return collect_rules(t, ps, jget(rs, "rules"), where);
     char path[1100];
     if (!strcmp(type, "local")) snprintf(path, sizeof path, "%s", jgets(rs, "path"));
@@ -489,7 +518,7 @@ static int collect_set(struct tr *t, struct plist_set *ps, const char *tag) {
     }
     char err[512];
     struct jval *src = json_parse_file(path, err, sizeof err);
-    if (!src) { tw(t, "%s: %s — набор пропущен", where, err); return 1; }
+    if (!src) { tw(t, "%s" RS "файл набора не читается (%s)" RS "набор пропущен, правила над ним не ставятся" RS "перекачайте набор или проверьте путь и формат файла", where, err); return 1; }
     int rc = collect_rules(t, ps, jget(src, "rules"), where);
     json_free(src);
     return rc;
@@ -916,7 +945,7 @@ static const char *emit_selector(struct tr *t, const char *tag, const struct jva
     if (first) {
         name = emit_output(t, first, depth + 1);
         if (name) now = first;
-        else tw(t, "селектор %s: выбранный %s не переводится — беру следующий", tag, first);
+        else tw(t, "outbounds[tag=%s]" RS "выбранный в селекторе выход «%s» steer не выражает" RS "взят следующий член селектора" RS "выберите в селекторе другой узел или поставьте нужный пакет steer", tag, first);
     }
     for (size_t i = 0; !name && i < jlen(m); i++) {
         const char *mt = jat(m, i)->s;
@@ -934,7 +963,7 @@ static const char *emit_selector(struct tr *t, const char *tag, const struct jva
         jobj_set(t->map_out, mt, e);
     }
     if (!name) {
-        tw(t, "селектор %s: ни одного члена с видом в steer — правила в него сняты", tag);
+        tw(t, "outbounds[tag=%s]" RS "ни один член селектора не имеет вида, который знает steer" RS "правила, ведущие в селектор, пропущены" RS "добавьте в селектор узел поддерживаемого вида (vless, hysteria2, trojan, shadowsocks и т.п.)", tag);
         return NULL;
     }
     struct jval *e = jnew(J_OBJ);
@@ -974,13 +1003,12 @@ static const char *emit_output(struct tr *t, const char *tag, int depth) {
         return name;
     }
     case SBO_BLOCK: {
-        tw(t, "выход %s (block): вида block в steer пока нет — правила в него сняты", tag);
+        tw(t, "outbounds[tag=%s]" RS "выход block: вида block в steer пока нет" RS "правила, ведущие в него, пропущены (трафик идёт по следующим правилам)" RS "блокировку придётся делать средствами роутера (firewall) или ждать вида block в steer", tag);
         map_out(t, tag, "", "Block");
         return NULL;
     }
     case SBO_REMARK:
-        tw(t, "выход %s: direct с routing_mark %#llx (zapret forkop) пока не переводится — "
-           "правила в него сняты", tag, (unsigned long long)mark);
+        tw(t, "outbounds[tag=%s]" RS "выход direct с routing_mark %#llx (обход zapret у forkop) пока не переводится" RS "правила, ведущие в него, пропущены" RS "обход настройте отдельно или отключите его в forkop", tag, (unsigned long long)mark);
         map_out(t, tag, "", "Direct");
         return NULL;
     case SBO_DNS:
@@ -1044,8 +1072,7 @@ static const char *emit_output(struct tr *t, const char *tag, int depth) {
             const char *mn = emit_output(t, mt, depth + 1);
             if (!mn) continue;
             if (!strcmp(mn, "direct")) {
-                tw(t, "группа %s: член %s — direct, а член группы steer должен иметь устройство; снят",
-                   tag, mt);
+                tw(t, "outbounds[tag=%s]" RS "член «%s» — direct, а у члена группы steer должно быть своё устройство" RS "член убран из группы" RS "уберите direct из группы или вынесите его в отдельное правило", tag, mt);
                 continue;
             }
             int dup = 0;
@@ -1057,7 +1084,7 @@ static const char *emit_output(struct tr *t, const char *tag, int depth) {
         }
         if (!members->len) {
             json_free(members);
-            tw(t, "группа %s: ни одного члена с видом в steer — правила в неё сняты", tag);
+            tw(t, "outbounds[tag=%s]" RS "ни один член группы не имеет вида, который знает steer" RS "правила, ведущие в группу, пропущены" RS "добавьте в группу узел поддерживаемого вида", tag);
             return NULL;
         }
         const char *name = names_get(&t->onames, tag, NULL);
@@ -1085,7 +1112,7 @@ static const char *emit_output(struct tr *t, const char *tag, int depth) {
         return name;
         }
     default:
-        tw(t, "выход %s: тип %s не переводится — правила в него сняты", tag, type ? type : "?");
+        tw(t, "outbounds[tag=%s]" RS "тип выхода «%s» steer не выражает" RS "правила, ведущие в него, пропущены" RS "замените узел на поддерживаемый тип или уберите правила, которые на него ссылаются", tag, type ? type : "?");
         map_out(t, tag, "", type ? type : "?");
         return NULL;
     }
@@ -1160,7 +1187,7 @@ static int rule_keys_ok(struct tr *t, const struct jval *r, const char *where) {
         for (int j = 0; ok[j]; j++)
             if (!strcmp(k, ok[j])) good = 1;
         if (!good) {
-            tw(t, "%s: условие «%s» ядро не выражает — правило снято", where, k);
+            tw(t, "%s" RS "условие «%s» ядро steer не выражает" RS "правило пропущено" RS "перепишите правило поддерживаемыми условиями (домены, адреса, наборы, порты, сеть, клиент) или обработайте этот трафик иначе", where, k);
             return 0;
         }
     }
@@ -1174,7 +1201,7 @@ static int emit_rule_ex(struct tr *t, size_t idx, const struct jval *r, const ch
     snprintf(where, sizeof where, "%s[%zu]", section, idx);
     if (!rule_keys_ok(t, r, where)) return 0;
     if (jget(r, "protocol")) {
-        tw(t, "%s: protocol у правила с выходом ядро не выражает — правило снято", where);
+        tw(t, "%s" RS "условие protocol у правила с выходом ядро steer не выражает" RS "правило пропущено" RS "уберите protocol и сузьте правило доменами, адресами или портами", where);
         return 0;
     }
     const char *client = NULL;
@@ -1221,8 +1248,7 @@ static int emit_rule_ex(struct tr *t, size_t idx, const struct jval *r, const ch
     snprintf(tagbuf, sizeof tagbuf, "r%zu", idx);
     if (!has_dest) {
         if (!client) {
-            tw(t, "%s: правило без условий назначения и клиента — весь трафик LAN; снято, "
-               "чтобы не забрать лишнего", where);
+            tw(t, "%s" RS "у правила нет ни условий назначения, ни клиента: оно забрало бы весь трафик LAN" RS "правило пропущено, чтобы не перехватить лишнего" RS "добавьте правилу домены, адреса, набор или клиента", where);
             plist_free(&ps);
             return 0;
         }
@@ -1335,7 +1361,7 @@ static struct jval *dns_upstream(struct tr *t, const struct jval *srv) {
                        : !strcmp(type, "tls") ? "tls" : !strcmp(type, "https") ? "https"
                        : !strcmp(type, "quic") ? "quic" : NULL;
     if (!scheme) {
-        tw(t, "dns: сервер %s типа %s в апстрим steer не переводится", jgets(srv, "tag"), type);
+        tw(t, "dns.servers[tag=%s]" RS "тип DNS-сервера «%s» не бывает апстримом steer" RS "сервер пропущен" RS "используйте udp, tcp, tls, https или quic-сервер", jgets(srv, "tag"), type);
         return NULL;
     }
     unsigned char a[16];
@@ -1350,8 +1376,7 @@ static struct jval *dns_upstream(struct tr *t, const struct jval *srv) {
         snprintf(url + strlen(url), sizeof url - strlen(url), "%s", path && *path ? path : "/dns-query");
     }
     if ((!strcmp(scheme, "udp") || !strcmp(scheme, "tcp")) && !is_ip) {
-        tw(t, "dns: сервер %s (%s) — у udp/tcp steer нужен адрес, не имя; не переводится",
-           jgets(srv, "tag"), host);
+        tw(t, "dns.servers[tag=%s]" RS "у udp/tcp-сервера указано имя «%s», а steer нужен IP-адрес" RS "сервер пропущен" RS "впишите IP-адрес сервера вместо имени", jgets(srv, "tag"), host);
         return NULL;
     }
     struct jval *u = jnew(J_OBJ);
@@ -1391,7 +1416,7 @@ static int emit_dns(struct tr *t) {
         if (type && !strcmp(type, "fakeip")) {
             const char *r4 = jgets(s, "inet4_range");
             if (r4 && strcmp(r4, "198.18.0.0/15"))
-                tw(t, "dns: пул fake-IP %s — у steer пул 198.18.0.0/15, берётся он", r4);
+                tw(t, "dns.servers[tag=%s]" RS "пул fake-IP %s: у steer пул фиксированный, 198.18.0.0/15" RS "взят пул steer" RS "ничего, если адреса пула вам не важны; иначе в sing-box пул 198.18.0.0/15", jgets(s, "tag"), r4);
             continue;
         }
         struct jval *u = dns_upstream(t, s);
@@ -1422,6 +1447,77 @@ static int emit_dns(struct tr *t) {
     return 0;
 }
 
+/* ---- отчёт «что не переводится» --------------------------------------------------------- */
+
+const char *box_report_path(void) {
+    const char *e = getenv("STEER_BOX_REPORT");
+    return e && *e ? e : "/tmp/steer-box-report.json";
+}
+
+/* {generated, count, missing_sets, items:[{where, why, instead, todo}]}; count — все
+ * предупреждения, items — первые REPORT_MAX. Запись атомарная (tmp + rename), на tmpfs. */
+struct jval *box_report_doc(const struct tr_result *res) {
+    struct jval *d = jnew(J_OBJ);
+    if (!d) return NULL;
+    jobj_set(d, "have", jbool(1));
+    jobj_set(d, "generated", jint((int64_t)time(NULL)));
+    jobj_set(d, "count", jint((int64_t)res->warnings));
+    jobj_set(d, "missing_sets", jint((int64_t)res->missing_sets));
+    struct jval *items = jnew(J_ARR);
+    for (size_t i = 0; res->report && i < res->report->len; i++) {
+        const struct jval *e = res->report->a[i];
+        struct jval *c = jnew(J_OBJ);
+        if (!c) break;
+        static const char *const K[] = { "where", "why", "instead", "todo" };
+        for (size_t k = 0; k < 4; k++) {
+            const char *v = jgets(e, K[k]);
+            jobj_set(c, K[k], jstr(v ? v : ""));
+        }
+        jarr_push(items, c);
+    }
+    jobj_set(d, "items", items);
+    return d;
+}
+
+int box_report_save(const struct tr_result *res, const char *path) {
+    struct jval *d = box_report_doc(res);
+    if (!d) return -1;
+    size_t n;
+    char *s = json_to_str(d, 2, &n);
+    json_free(d);
+    if (!s) return -1;
+    char tmp[1100];
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    int rc = -1;
+    if (f) {
+        rc = fwrite(s, 1, n, f) == n && fputc('\n', f) != EOF ? 0 : -1;
+        if (fclose(f)) rc = -1;
+        if (!rc && rename(tmp, path)) rc = -1;
+        if (rc) unlink(tmp);
+    }
+    free(s);
+    return rc;
+}
+
+/* Человеку: каждая запись четырьмя строками. d — документ box_report_doc или прочитанный файл. */
+void box_report_print(FILE *out, const struct jval *d) {
+    const struct jval *items = jget(d, "items");
+    size_t n = jlen(items);
+    long count = jgeti(d, "count", (long)n), missing = jgeti(d, "missing_sets", 0);
+    if (count <= 0) fprintf(out, "Всё переведено.\n");
+    else fprintf(out, "Не переводится: %ld\n", count);
+    for (size_t i = 0; i < n; i++) {
+        const struct jval *e = jat(items, i);
+        const char *w = jgets(e, "where"), *y = jgets(e, "why"), *r = jgets(e, "instead"), *t = jgets(e, "todo");
+        fprintf(out, "\n%zu. %s\n   Почему: %s\n   Что будет вместо: %s\n   Что делать: %s\n", i + 1,
+                w ? w : "", y ? y : "", r ? r : "", t ? t : "");
+    }
+    if (count > 0 && (size_t)count > n) fprintf(out, "\n… и ещё %zu (показаны первые %zu)\n", (size_t)count - n, n);
+    if (missing > 0)
+        fprintf(out, "\nНаборов правил ещё не скачано: %ld (правила над ними встанут после загрузки).\n", missing);
+}
+
 /* ---- сборка ----------------------------------------------------------------------------- */
 
 int box_translate(const struct jval *cfg, const struct tr_opts *o, struct tr_result *res,
@@ -1431,6 +1527,7 @@ int box_translate(const struct jval *cfg, const struct tr_opts *o, struct tr_res
     char lists_dir[1100];
     snprintf(lists_dir, sizeof lists_dir, "%s/lists", o->dir);
     if (mkdirs(lists_dir)) return snprintf(err, errn, "%s: %s", lists_dir, strerror(errno)), -1;
+    t.report = jnew(J_ARR);
     t.spec = jnew(J_OBJ);
     t.outputs = jnew(J_OBJ);
     t.lists = jnew(J_OBJ);
@@ -1490,8 +1587,7 @@ int box_translate(const struct jval *cfg, const struct tr_opts *o, struct tr_res
                     other = 1;
             }
             if (op <= 0 || op > 65535 || !names_only || other) {
-                tw(&t, "%s: route-options переводится только как override_port у domain и "
-                   "domain_suffix — правило снято", where);
+                tw(&t, "%s" RS "route-options steer переводит только как override_port у domain и domain_suffix" RS "правило пропущено" RS "оставьте в правиле только override_port, domain и domain_suffix", where);
                 continue;
             }
             const char *fin = jgets(jget(cfg, "route"), "final");
@@ -1508,10 +1604,10 @@ int box_translate(const struct jval *cfg, const struct tr_opts *o, struct tr_res
             long n = jget(r, "protocol") ? jstrlist(jget(r, "protocol"), l, 4) : 0;
             if (n == 1 && !strcmp(l[0], "quic") && jlen(r) <= 3) {
                 t.quic_reject = 1;
-                tw(&t, "%s: отказ QUIC пока не переводится (нужен вид block)", where);
+                tw(&t, "%s" RS "отказ QUIC (reject protocol quic) пока не переводится: в steer нет вида block" RS "отказ не создаётся, QUIC идёт по обычным правилам" RS "отключите QUIC в браузере или заблокируйте UDP/443 средствами роутера", where);
                 continue;
             }
-            tw(&t, "%s: reject пока не переводится (нужен вид block в steer)", where);
+            tw(&t, "%s" RS "правило reject пока не переводится: в steer нет вида block" RS "правило пропущено, трафик идёт по следующим правилам (не блокируется)" RS "блокировку сделайте средствами роутера (firewall)", where);
             continue;
         }
         const char *ob = NULL, *out = NULL;
@@ -1628,7 +1724,10 @@ int box_translate(const struct jval *cfg, const struct tr_opts *o, struct tr_res
     free(t.resolve_sets);
     res->warnings = t.warnings;
     res->missing_sets = t.missing_sets;
+    res->report = t.report;
     if (t.failed) {
+        json_free(t.report);
+        res->report = NULL;
         json_free(t.spec);
         json_free(t.map);
         if (!err[0]) snprintf(err, errn, "перевод не удался");
@@ -1636,12 +1735,14 @@ int box_translate(const struct jval *cfg, const struct tr_opts *o, struct tr_res
     }
     res->spec = t.spec;
     res->map = t.map;
+    if (o->report_path) box_report_save(res, o->report_path);
     return 0;
 }
 
 void box_translate_free(struct tr_result *res) {
     json_free(res->spec);
     json_free(res->map);
+    json_free(res->report);
     memset(res, 0, sizeof *res);
 }
 
@@ -1697,5 +1798,54 @@ int cmd_box_needs(const struct box_opts *o) {
     putchar('\n');
     json_free(need);
     json_free(cfg);
+    return 0;
+}
+
+static int rm_cb(const char *p, const struct stat *sb, int flag, struct FTW *f) {
+    (void)sb; (void)flag; (void)f;
+    return remove(p);
+}
+
+/* box-report [--json] [--saved]: отчёт «что из конфига не переводится». Без --saved конфиг
+ * переводится заново во временный каталог (спека и службы не трогаются); --saved — отчёт
+ * последнего перевода службы (/tmp/steer-box-report.json). Выбор селекторов в разборе по
+ * конфигу не виден: селектор берёт первый член. */
+int cmd_box_report(const struct box_opts *o, int argc, char **argv) {
+    int json = 0, saved = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--json")) json = 1;
+        else if (!strcmp(argv[i], "--saved")) saved = 1;
+        else { fprintf(stderr, "FATAL[0000] box-report [--json] [--saved]\n"); return 1; }
+    }
+    char err[512];
+    struct jval *d = NULL;
+    if (saved) {
+        d = json_parse_file(box_report_path(), err, sizeof err);
+        if (!d) { fprintf(stderr, "FATAL[0000] отчёта пока нет (%s)\n", err); return 1; }
+    } else {
+        struct jval *cfg = box_load_config(o, err, sizeof err);
+        if (!cfg) { fprintf(stderr, "FATAL[0000] %s\n", err); return 1; }
+        struct sbcheck ck;
+        box_log_level(BL_ERROR);
+        if (sb_check(cfg, &ck)) { fprintf(stderr, "FATAL[0000] %s\n", ck.first); json_free(cfg); return 1; }
+        struct box_settings set;
+        box_settings_load(&set);
+        char dir[] = "/tmp/steer-box-report.XXXXXX", rsdir[1100];
+        if (!mkdtemp(dir)) { fprintf(stderr, "FATAL[0000] %s\n", strerror(errno)); json_free(cfg); return 1; }
+        snprintf(rsdir, sizeof rsdir, "%s/rulesets", set.state_dir);
+        const struct jval *m = jget(jget(cfg, "route"), "default_mark");
+        struct tr_opts to = { .dir = dir, .ruleset_dir = rsdir, .router_self = 1,
+            .egress_mark = !m ? 0 : m->t == J_NUM ? (uint32_t)m->i : m->t == J_STR && m->s ? (uint32_t)strtoul(m->s, NULL, 0) : 0 };
+        struct tr_result res;
+        int rc = box_translate(cfg, &to, &res, err, sizeof err);
+        json_free(cfg);
+        if (!rc) { d = box_report_doc(&res); box_translate_free(&res); }
+        nftw(dir, rm_cb, 8, FTW_DEPTH | FTW_PHYS);
+        if (rc) { fprintf(stderr, "FATAL[0000] %s\n", err); return 1; }
+        if (!d) { fprintf(stderr, "FATAL[0000] нет памяти\n"); return 1; }
+    }
+    if (json) { json_write(stdout, d, 2); putchar('\n'); }
+    else box_report_print(stdout, d);
+    json_free(d);
     return 0;
 }

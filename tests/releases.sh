@@ -365,6 +365,21 @@ out="$(T="$T" rpcd install '{"version":"2.0.0","packages":["steer-core"]}')"
 check "install со спекой, служба выключена: ставится, служба не тронута" "true;0" \
       "$(printf '%s' "$out" | jget ok);$(grep -c '^stop$\|^disable$' "$T/init.log")"
 
+# report: отчёт «что не переводится» — файл коннектора как есть; нет файла или он битый — have=false.
+STEER_BOX_REPORT="$T/report.json"; export STEER_BOX_REPORT
+rm -f "$STEER_BOX_REPORT"
+out="$(rpcd report)"
+check "report без файла: have=false, count=0" "false;0" "$(printf '%s' "$out" | jget have);$(printf '%s' "$out" | jget count)"
+printf '%s\n' '{"have":true,"count":1,"missing_sets":0,"items":[{"where":"route.rules[2]","why":"п","instead":"в","todo":"д"}]}' > "$STEER_BOX_REPORT"
+out="$(rpcd report)"
+check "report с файлом: count и запись" "1;route.rules[2]" \
+      "$(printf '%s' "$out" | jget count);$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["items"][0]["where"])')"
+printf 'не json' > "$STEER_BOX_REPORT"
+check "report с битым файлом: have=false" "false" "$(rpcd report | jget have)"
+check "rpcd list знает report, ACL его разрешает" "1;1" \
+      "$(JSHN_SH="$ROOT/tests/stub/jshn.sh" sh "$RPCD" list | grep -c '"report"');$(grep -c '"report"' "$ROOT/luci/root/usr/share/rpcd/acl.d/luci-app-steer-box-connector.json")"
+unset STEER_BOX_REPORT
+
 # postinst пакета: со спекой службу не трогает, без спеки — стоп и disable.
 PI="$ROOT/scripts/postinst"
 run_pi() { T="$T" STEER_INIT="$T/init-steer" STEER_SPEC_DIR="$T/steerdir" SING_BOX_INIT="$T/none" PATH="$T/bin:$PATH" sh "$PI" >"$T/pi.out" 2>&1; }

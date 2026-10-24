@@ -69,6 +69,7 @@ int cmd_run(const struct box_opts *o);
 /* Скрытая: перевести конфиг в спеку steer в каталог и напечатать её (отладка, стенды, LuCI). */
 int cmd_box_needs(const struct box_opts *o);
 int cmd_box_translate(const struct box_opts *o, int argc, char **argv);
+int cmd_box_report(const struct box_opts *o, int argc, char **argv);
 
 /* Случайные байты из ядра; 0 — получены. */
 int box_random(void *buf, size_t n);

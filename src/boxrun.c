@@ -488,7 +488,7 @@ static int translate_run(struct box_rt *rt, struct jval *cfg, int first, struct 
     int nd = lan_devices(devs, 16);
     struct tr_opts to = { .dir = rt->inst, .ruleset_dir = rt->rsdir, .lan_devices = devs,
                           .lan_n = (size_t)nd, .egress_mark = rt->default_mark, .router_self = 1,
-                          .selected = rt->selected };
+                          .selected = rt->selected, .report_path = box_report_path() };
     struct tr_result res;
     *map = NULL;
     char e1[512];

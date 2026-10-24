@@ -5,6 +5,8 @@
 #             какая версия, нужен ли текущему конфигу (sing-box box-needs);
 #   releases  версии steer: из перечня выпусков splify2/releases (version.json), а если он не
 #             ответил — из выпусков GitHub (splify2/steer);
+#   report    что из конфига sing-box не переводится в steer: отчёт последнего перевода службы
+#             (/tmp/steer-box-report.json, tmpfs), {have, count, missing_sets, items[]};
 #   install   поставить выбранной версии steer-core и модули (по умолчанию — те, что нужны).
 #
 # Пакеты ставятся с выпусков steer, как у splify2: их нет в feeds OpenWrt. Адреса и sha256 файлов —
@@ -17,6 +19,7 @@ OPENWRT_RELEASE=${OPENWRT_RELEASE:-/etc/openwrt_release}
 SING_BOX=${SING_BOX:-/usr/bin/sing-box}
 STEER_INIT=${STEER_INIT:-/etc/init.d/steer}
 STEER_SPEC_DIR=${STEER_SPEC_DIR:-/etc/steer}
+STEER_BOX_REPORT=${STEER_BOX_REPORT:-/tmp/steer-box-report.json}
 
 REPO=splify2/steer
 # Перечень выпусков splify2/releases — три адреса одного version.json, по порядку. Он ПЕРВЫЙ
@@ -184,7 +187,7 @@ pkg_fetch() {  # ВЕРСИЯ ИМЯ_ФАЙЛА ФАЙЛ [РЕПОЗИТОРИЙ
 
 case "$1" in
 list)
-	echo '{ "status": {}, "releases": {}, "install": { "version": "", "packages": [] } }'
+	echo '{ "status": {}, "releases": {}, "report": {}, "install": { "version": "", "packages": [] } }'
 	;;
 call)
 	case "$2" in
@@ -212,6 +215,15 @@ call)
 		done
 		json_close_array
 		json_dump
+		;;
+	report)
+		# Отчёт пишет сам коннектор при каждом переводе. Файла нет (служба не запускалась после
+		# загрузки) или он не разбирается — «отчёта нет», а не пустой список «всё переведено».
+		if [ -s "$STEER_BOX_REPORT" ] && [ -n "$(jsonfilter -i "$STEER_BOX_REPORT" -e '@.count' 2>/dev/null)" ]; then
+			cat "$STEER_BOX_REPORT"
+		else
+			echo '{ "have": false, "count": 0, "missing_sets": 0, "items": [] }'
+		fi
 		;;
 	releases)
 		json_init
