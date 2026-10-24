@@ -713,13 +713,13 @@ static void conn_id(const struct jval *e, char *out, size_t n) {
 }
 
 /* Первое появление соединения — время start (conntrack его не хранит). */
-struct seen { char id[40]; long long at; };
+struct seen { char id[40]; long long at; int live; /* встречено в последнем снимке */ };
 static struct seen *g_seen;
 static size_t g_seen_n, g_seen_cap;
 
 static long long seen_at(const char *id, long long now) {
     for (size_t i = 0; i < g_seen_n; i++)
-        if (!strcmp(g_seen[i].id, id)) return g_seen[i].at;
+        if (!strcmp(g_seen[i].id, id)) { g_seen[i].live = 1; return g_seen[i].at; }
     if (g_seen_n == g_seen_cap) {
         size_t nc = g_seen_cap ? g_seen_cap * 2 : 256;
         struct seen *ns = realloc(g_seen, nc * sizeof *ns);
@@ -729,8 +729,22 @@ static long long seen_at(const char *id, long long now) {
     }
     snprintf(g_seen[g_seen_n].id, sizeof g_seen[g_seen_n].id, "%s", id);
     g_seen[g_seen_n].at = now;
+    g_seen[g_seen_n].live = 1;
     g_seen_n++;
     return now;
+}
+
+/* Память «первого появления» не растёт без конца: соединений, которых в снимке не было, не
+ * держим, а у живых время старта остаётся прежним (раньше таблица сбрасывалась целиком, и у всех
+ * идущих соединений start прыгал на «сейчас»). */
+static void seen_prune(size_t keep) {
+    if (g_seen_n > keep * 2 + 256) {
+        size_t j = 0;
+        for (size_t i = 0; i < g_seen_n; i++)
+            if (g_seen[i].live) g_seen[j++] = g_seen[i];
+        g_seen_n = j;
+    }
+    for (size_t i = 0; i < g_seen_n; i++) g_seen[i].live = 0;
 }
 
 static void iso_time(long long ms, char *buf, size_t n) {
@@ -808,8 +822,7 @@ static struct jval *conns_to_clash(struct box_rt *rt, const struct jval *steer_c
         jarr_push(arr, c);
         keep++;
     }
-    /* Память «первого появления» не растёт без конца: соединений, которых нет, не держим. */
-    if (g_seen_n > keep * 2 + 256) g_seen_n = 0;
+    seen_prune(keep);
     return arr;
 }
 
