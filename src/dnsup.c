@@ -26,6 +26,7 @@ struct ujob {
     int blocking;
     pthread_cond_t cond;
     int done;
+    int abandoned;              /* ждущий сдался по сроку: задание освобождает рабочий поток */
     uint8_t *resp;
     long resp_n;
     char err[160];
@@ -436,6 +437,13 @@ static void *worker(void *arg) {
         }
         if (j->blocking) {
             pthread_mutex_lock(&u->mu);
+            if (j->abandoned) {
+                /* Ждущий уже ушёл (срок вышел): ответ некому отдать, задание освобождаем здесь. */
+                pthread_cond_destroy(&j->cond);
+                free(j->q);
+                free(j);
+                continue;           /* mu удерживается — к началу цикла */
+            }
             if (n > 0) {
                 j->resp = malloc((size_t)n);
                 if (j->resp) memcpy(j->resp, resp, (size_t)n);
@@ -529,6 +537,9 @@ long dnsup_ask_blocking(struct dnsup *u, const uint8_t *q, size_t n, uint8_t *re
         r = j->resp_n;
     }
     int done = j->done;
+    /* Не дождались — задание остаётся рабочему потоку, он может писать в него прямо сейчас: ему
+     * оставляем метку, и он освободит его сам, закончив вопрос. */
+    if (!done) j->abandoned = 1;
     pthread_mutex_unlock(&u->mu);
     if (done) {
         pthread_cond_destroy(&j->cond);
@@ -536,7 +547,5 @@ long dnsup_ask_blocking(struct dnsup *u, const uint8_t *q, size_t n, uint8_t *re
         free(j->q);
         free(j);
     }
-    /* Не дождались — задание освободит рабочий поток? Нет: он уже пишет в j. Утечка одной
-     * записи на зависший вопрос лучше, чем обращение к освобождённой памяти. */
     return r;
 }
