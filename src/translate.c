@@ -45,6 +45,8 @@ struct tr {
     int allow_all;                 /* правило без назначения и клиента допустимо (reject protocol quic) */
     int self_used;                 /* заведён клиент router (self) */
     long override_port;            /* правило route-options: подмена порта у списков правила */
+    char **ports_pool;             /* строки портов сужений (narrow.ports): живут до конца перевода */
+    size_t ports_n;
 };
 
 /* Предупреждение перевода — запись отчёта «что не переводится». Формат — четыре поля через RS:
@@ -240,11 +242,13 @@ void box_ruleset_cache_path(const char *dir, const char *tag, const char *format
 /* Сужение списка: протокол и порты (ключи proto и ports списка steer). */
 struct narrow {
     int tcp, udp;                  /* оба 0 — протокол не сужен */
-    char ports[1024];              /* «443,50000-65535» или пусто */
+    const char *ports;             /* «443,50000-65535»; NULL — не сужены. Строка в t->ports_pool */
 };
 
+static int narrow_has_ports(const struct narrow *a) { return a->ports && a->ports[0]; }
+
 static int narrow_same(const struct narrow *a, const struct narrow *b) {
-    return a->tcp == b->tcp && a->udp == b->udp && !strcmp(a->ports, b->ports);
+    return a->tcp == b->tcp && a->udp == b->udp && !strcmp(a->ports ? a->ports : "", b->ports ? b->ports : "");
 }
 
 /* Строки, накопленные для одного списка: имена (в записи steer) и подсети. */
@@ -273,6 +277,27 @@ struct pending_list {
     const char *srs;               /* набор .srs — путь */
 };
 
+static int ports_add(char **b, size_t *n, size_t *cap, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int k = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (k < 0) return -1;
+    if (*n + (size_t)k + 1 > *cap) {
+        size_t nc = *cap ? *cap * 2 : 64;
+        while (nc < *n + (size_t)k + 1) nc *= 2;
+        char *np = realloc(*b, nc);
+        if (!np) return -1;
+        *b = np;
+        *cap = nc;
+    }
+    va_start(ap, fmt);
+    vsnprintf(*b + *n, (size_t)k + 1, fmt, ap);
+    va_end(ap);
+    *n += (size_t)k;
+    return 0;
+}
+
 /* Сужение из правила sing-box (network, port, port_range). 0 — разобралось; -1 — значение,
  * которого steer не выражает (тогда правило снимается). */
 static int narrow_from_rule(struct tr *t, const struct jval *r, struct narrow *nw, const char *where) {
@@ -288,29 +313,36 @@ static int narrow_from_rule(struct tr *t, const struct jval *r, struct narrow *n
         }
         if (nw->tcp && nw->udp) nw->tcp = nw->udp = 0;
     }
-    size_t j = 0;
+    /* Порты копятся в строке без предела длины: число портов в правиле не ограничено. */
+    char *pb = NULL;
+    size_t pn = 0, pcap = 0;
     struct jval *port = jget(r, "port");
     for (size_t i = 0; port && i < (port->t == J_ARR ? port->len : 1); i++) {
         const struct jval *p = port->t == J_ARR ? port->a[i] : port;
-        if (p->t != J_NUM) { tw(t, "%s" RS "в port ожидается число, а там другое значение" RS "правило пропущено" RS "впишите порт числом", where); return -1; }
-        j += (size_t)snprintf(nw->ports + j, sizeof nw->ports - j, "%s%lld", j ? "," : "", (long long)p->i);
-        if (j >= sizeof nw->ports) { tw(t, "%s" RS "портов в правиле больше, чем помещается в одно условие steer" RS "правило пропущено" RS "разбейте правило на несколько с меньшим числом портов или задайте диапазон через port_range", where); return -1; }
+        if (p->t != J_NUM) { free(pb); tw(t, "%s" RS "в port ожидается число, а там другое значение" RS "правило пропущено" RS "впишите порт числом", where); return -1; }
+        if (ports_add(&pb, &pn, &pcap, "%s%lld", pn ? "," : "", (long long)p->i)) { free(pb); return tfail(t, "нет памяти"), -1; }
     }
     struct jval *pr = jget(r, "port_range");
     long prn = pr ? jstrlist(pr, NULL, 0) : 0;
     if (prn > 0) {
         const char **l = calloc((size_t)prn, sizeof *l);
-        if (!l) return -1;
+        if (!l) { free(pb); return -1; }
         jstrlist(pr, l, (size_t)prn);
         for (long i = 0; i < prn; i++) {
             const char *c = strchr(l[i], ':');
-            if (!c) { tw(t, "%s" RS "port_range «%s» записан без «:», а нужен вид от:до" RS "правило пропущено" RS "запишите диапазон как 1000:2000", where, l[i]); free(l); return -1; }
+            if (!c) { tw(t, "%s" RS "port_range «%s» записан без «:», а нужен вид от:до" RS "правило пропущено" RS "запишите диапазон как 1000:2000", where, l[i]); free(l); free(pb); return -1; }
             long a = c == l[i] ? 1 : strtol(l[i], NULL, 10);
             long b = c[1] ? strtol(c + 1, NULL, 10) : 65535;
-            j += (size_t)snprintf(nw->ports + j, sizeof nw->ports - j, "%s%ld-%ld", j ? "," : "", a, b);
-            if (j >= sizeof nw->ports) { free(l); tw(t, "%s" RS "портов в правиле больше, чем помещается в одно условие steer" RS "правило пропущено" RS "разбейте правило на несколько с меньшим числом портов или сузьте диапазоны", where); return -1; }
+            if (ports_add(&pb, &pn, &pcap, "%s%ld-%ld", pn ? "," : "", a, b)) { free(l); free(pb); return tfail(t, "нет памяти"), -1; }
         }
         free(l);
+    }
+    if (pb) {
+        char **np = realloc(t->ports_pool, (t->ports_n + 1) * sizeof *np);
+        if (!np) { free(pb); return tfail(t, "нет памяти"), -1; }
+        t->ports_pool = np;
+        np[t->ports_n++] = pb;
+        nw->ports = pb;
     }
     return 0;
 }
@@ -334,7 +366,7 @@ static int list_keys_ok(struct tr *t, const struct jval *r, const char *where) {
 
 /* Домены и подсети одного правила sing-box — в строки списка steer (записи — srs.h steer:
  * «=x» точное, «x» имя с поддоменами, «*.x» буквальный суффикс, «*слово*», «re:…»). */
-static int add_dest(struct pending_list *pl, const struct jval *r) {
+static int add_dest(struct tr *t, struct pending_list *pl, const struct jval *r, const char *where) {
     const char *l[1];
     struct { const char *key; const char *pre, *post; } m[] = {
         { "domain", "=", "" }, { "domain_suffix", "", "" }, { "domain_keyword", "*", "*" },
@@ -346,6 +378,11 @@ static int add_dest(struct pending_list *pl, const struct jval *r) {
         for (long i = 0; i < n; i++) {
             const struct jval *e = v->t == J_ARR ? v->a[i] : v;
             const char *s = e->s;
+            if (strpbrk(s, "\r\n")) {
+                /* Строка списка кончается переводом строки: имя с ним стало бы двумя записями. */
+                tw(t, "%s" RS "в %s есть значение с переводом строки, имя так записать нельзя" RS "значение пропущено" RS "уберите перевод строки из значения", where, m[k].key);
+                continue;
+            }
             char line[1100];
             if (!strcmp(m[k].key, "domain_suffix") && s[0] == '.') snprintf(line, sizeof line, "*%s", s);
             else snprintf(line, sizeof line, "%s%s%s", m[k].pre, s, m[k].post);
@@ -405,7 +442,7 @@ static int collect_rules(struct tr *t, struct plist_set *ps, const struct jval *
         struct narrow nw;
         if (narrow_from_rule(t, r, &nw, w)) continue;
         struct pending_list *pl = plist_for(ps, &nw);
-        if (!pl || add_dest(pl, r)) return tfail(t, "нет памяти");
+        if (!pl || add_dest(t, pl, r, w)) return tfail(t, "нет памяти");
     }
     return 0;
 }
@@ -414,8 +451,8 @@ static int collect_rules(struct tr *t, struct plist_set *ps, const struct jval *
  * портом над набором с портом — пересечение, которое здесь не считается (в настоящих конфигах
  * podkop и forkop его нет). */
 static int narrow_merge(struct tr *t, struct narrow *dst, const struct narrow *rule, const char *where) {
-    if (!rule->tcp && !rule->udp && !rule->ports[0]) return 0;
-    if ((dst->tcp || dst->udp || dst->ports[0]) && !narrow_same(dst, rule)) {
+    if (!rule->tcp && !rule->udp && !narrow_has_ports(rule)) return 0;
+    if ((dst->tcp || dst->udp || narrow_has_ports(dst)) && !narrow_same(dst, rule)) {
         tw(t, "%s" RS "и у набора, и у правила заданы сеть или порты, а steer совмещает только одно сужение" RS "взято сужение правила, сужение набора отброшено" RS "оставьте network и port либо в наборе, либо в правиле", where);
     }
     *dst = *rule;
@@ -425,13 +462,14 @@ static int narrow_merge(struct tr *t, struct narrow *dst, const struct narrow *r
 /* Сужение списка steer: proto и ports («443,50000-65535» → [443, "50000-65535"]). */
 static void list_narrow(struct jval *l, const struct narrow *nw) {
     if (nw->tcp != nw->udp) jobj_set(l, "proto", jstr(nw->tcp ? "tcp" : "udp"));
-    if (!nw->ports[0]) return;
+    if (!narrow_has_ports(nw)) return;
     struct jval *a = jnew(J_ARR);
-    char buf[1024];
-    snprintf(buf, sizeof buf, "%s", nw->ports);
+    char *buf = strdup(nw->ports);
+    if (!buf) { json_free(a); return; }
     char *save;
     for (char *s = strtok_r(buf, ",", &save); s; s = strtok_r(NULL, ",", &save))
         jarr_push(a, strchr(s, '-') ? jstr(s) : jint(strtol(s, NULL, 10)));
+    free(buf);
     jobj_set(l, "ports", a);
 }
 
@@ -700,6 +738,36 @@ static int vless_needs_link(const struct jval *ob) {
     return (tt && !strcmp(tt, "xhttp")) || (enc && *enc && strcmp(enc, "none"));
 }
 
+/* Поле узла, которого в ссылке подписки нет: узел переведён без него, и это названо в отчёте. */
+static void node_drops(struct tr *t, const struct jval *ob, const char *field, const char *why) {
+    tw(t, "outbounds[tag=%s]" RS "поле %s узла не переносится: %s" RS "узел переведён без него" RS "проверьте, что узел работает без этого поля, или настройте его на стороне сервера", jgets(ob, "tag") ? jgets(ob, "tag") : "?", field, why);
+}
+
+/* Значение числового поля транспорта не равно умолчанию (поле есть и отличается). */
+static int num_nondefault(const struct jval *o, const char *key, long long def) {
+    const struct jval *v = jget(o, key);
+    return v && v->t == J_NUM && v->i != def;
+}
+
+/* Поля транспорта xhttp, которых нет в ссылке vless://. forkop всегда пишет no_grpc_header,
+ * sc_max_each_post_bytes и sc_min_posts_interval_ms, поэтому сравнение идёт со значениями по
+ * умолчанию Xray (false, 1000000, 30): предупреждение — только если человек их менял. */
+static void xhttp_drops(struct tr *t, const struct jval *ob, const struct jval *tr) {
+    if (!tr) return;
+    if (jgetb(tr, "no_grpc_header", 0)) node_drops(t, ob, "transport.no_grpc_header", "в ссылке vless:// такого параметра нет");
+    if (jgetb(tr, "no_sse_header", 0)) node_drops(t, ob, "transport.no_sse_header", "в ссылке vless:// такого параметра нет");
+    if (num_nondefault(tr, "sc_max_each_post_bytes", 1000000)) node_drops(t, ob, "transport.sc_max_each_post_bytes", "ядро steer берёт у xhttp только путь, host, mode и набивку");
+    if (num_nondefault(tr, "sc_min_posts_interval_ms", 30)) node_drops(t, ob, "transport.sc_min_posts_interval_ms", "ядро steer берёт у xhttp только путь, host, mode и набивку");
+    static const char *other[] = { "headers", "sc_max_buffered_posts", "sc_stream_up_server_secs",
+                                   "server_max_header_bytes", "xmux", "download", NULL };
+    for (int i = 0; other[i]; i++) {
+        char f[64];
+        if (!jget(tr, other[i])) continue;
+        snprintf(f, sizeof f, "transport.%s", other[i]);
+        node_drops(t, ob, f, "ядро steer берёт у xhttp только путь, host, mode и набивку");
+    }
+}
+
 static int node_text(struct tr *t, const struct jval *ob, struct strbuf *b) {
     const char *type = jgets(ob, "type");
     const char *server = jgets(ob, "server");
@@ -720,6 +788,7 @@ static int node_text(struct tr *t, const struct jval *ob, struct strbuf *b) {
         qparam(b, &first, "flow", jgets(ob, "flow"));
         tls_transport_params(b, &first, ob);
         const struct jval *tr = jget(ob, "transport");
+        if (tr && !strcmp(jgets(tr, "type") ? jgets(tr, "type") : "", "xhttp")) xhttp_drops(t, ob, tr);
         const struct jval *pad = tr ? jget(tr, "x_padding_bytes") : NULL;
         char pb[64] = "";
         if (pad && pad->t == J_STR && pad->s[0]) snprintf(pb, sizeof pb, "%s", pad->s);
@@ -767,22 +836,24 @@ static int node_text(struct tr *t, const struct jval *ob, struct strbuf *b) {
         char num[32];
         if (jget(ob, "up_mbps")) { snprintf(num, sizeof num, "%lld", (long long)jgeti(ob, "up_mbps", 0)); qparam(b, &first, "up", num); }
         if (jget(ob, "down_mbps")) { snprintf(num, sizeof num, "%lld", (long long)jgeti(ob, "down_mbps", 0)); qparam(b, &first, "down", num); }
+        if (jgets(ob, "network")) node_drops(t, ob, "network", "ссылка hysteria2:// не несёт ограничения сети");
         const struct jval *sp = jget(ob, "server_ports");
         long spn = sp ? jstrlist(sp, NULL, 0) : 0;
         if (spn > 0) {
-            char buf[512] = "";
+            /* Строка растёт по числу диапазонов: список серверных портов не обрезается. */
+            char *buf = NULL;
+            size_t bn = 0, bcap = 0;
             const char **l = calloc((size_t)spn, sizeof *l);
             if (!l) { tfail(t, "нет памяти"); return -1; }
             jstrlist(sp, l, (size_t)spn);
             for (long i = 0; i < spn; i++) {
-                char r[64];
-                snprintf(r, sizeof r, "%s", l[i]);
-                char *c = strchr(r, ':');
-                if (c) *c = '-';
-                snprintf(buf + strlen(buf), sizeof buf - strlen(buf), "%s%s", i ? "," : "", r);
+                if (ports_add(&buf, &bn, &bcap, "%s%s", i ? "," : "", l[i])) { free(l); free(buf); tfail(t, "нет памяти"); return -1; }
+                for (char *c = buf + bn - strlen(l[i]); *c; c++)
+                    if (*c == ':') { *c = '-'; break; }
             }
             free(l);
-            qparam(b, &first, "mport", buf);
+            qparam(b, &first, "mport", buf ? buf : "");
+            free(buf);
         }
         const char *hop = jgets(ob, "hop_interval");
         if (hop) {
@@ -804,12 +875,19 @@ static int node_text(struct tr *t, const struct jval *ob, struct strbuf *b) {
     if (!strcmp(type, "shadowsocks")) {
         /* SIP002 без base64: method:password процентным кодированием — так у 2022 не ломается
          * двоеточие пары ключей iPSK:uPSK. */
-        char mp[1024];
-        snprintf(mp, sizeof mp, "%s:%s", jgets(ob, "method"), jgets(ob, "password") ? jgets(ob, "password") : "");
+        const struct jval *uot = jget(ob, "udp_over_tcp");
+        if (uot && (uot->t == J_BOOL ? uot->b : uot->t != J_OBJ || jgetb(uot, "enabled", 1)))
+            node_drops(t, ob, "udp_over_tcp", "ссылка ss:// его не несёт, UDP пойдёт обычным путём");
+        const char *method = jgets(ob, "method"), *pw = jgets(ob, "password");
+        size_t mpn = strlen(method ? method : "") + strlen(pw ? pw : "") + 2;
+        char *mp = malloc(mpn), *enc = malloc(mpn * 2 + 8);
+        if (!mp || !enc) { free(mp); free(enc); return tfail(t, "нет памяти"); }
+        snprintf(mp, mpn, "%s:%s", method ? method : "", pw ? pw : "");
         raw(b, "ss://");
-        char enc[1400];
-        if (b64url_enc(mp, enc, sizeof enc)) return tfail(t, "ss: слишком длинный пароль");
+        if (b64url_enc(mp, enc, mpn * 2 + 8)) { free(mp); free(enc); return tfail(t, "нет памяти"); }
         raw(b, enc);
+        free(mp);
+        free(enc);
         raw(b, "@");
         host_port(b, server, port);
         raw(b, "\n");
@@ -831,6 +909,9 @@ static int node_text(struct tr *t, const struct jval *ob, struct strbuf *b) {
     if (!strcmp(type, "http")) {
         const struct jval *tls = jget(ob, "tls");
         raw(b, tls && jgetb(tls, "enabled", 0) ? "https://" : "http://");
+        const char *hp = jgets(ob, "path");
+        if (hp && strcmp(hp, "/")) node_drops(t, ob, "path", "ссылка http:// пути не несёт, запросы CONNECT идут на корень");
+        if (jget(ob, "headers")) node_drops(t, ob, "headers", "ссылка http:// заголовков не несёт");
         if (jgets(ob, "username")) {
             pct(b, jgets(ob, "username"));
             raw(b, ":");
@@ -1240,12 +1321,14 @@ static int emit_rule_ex(struct tr *t, size_t idx, const struct jval *r, const ch
         tw(t, "%s" RS "условие protocol у правила с выходом ядро steer не выражает" RS "правило пропущено" RS "уберите protocol и сузьте правило доменами, адресами или портами", where);
         return 0;
     }
+    if (jget(r, "ip_version"))
+        tw(t, "%s" RS "условие ip_version ядро steer не выражает" RS "правило действует для обоих семейств адресов" RS "если правило нужно только для одного семейства, ограничьте его адресами (ip_cidr)", where);
     const char *client = NULL;
     struct jval *src = jget(r, "source_ip_cidr");
     if (src) client = emit_client(t, src);
     struct narrow rnw;
     if (narrow_from_rule(t, r, &rnw, where)) return 0;
-    if (!strcmp(out_name, "block") && (rnw.tcp || rnw.udp || rnw.ports[0]) && rule_has_names(r)) {
+    if (!strcmp(out_name, "block") && (rnw.tcp || rnw.udp || narrow_has_ports(&rnw)) && rule_has_names(r)) {
         /* Имена в block резолвер глушит целиком (A 0.0.0.0), сужение протокола и порта им не
          * действует: правило закрыло бы сайт совсем, а не только его QUIC или порт. */
         tw(t, "%s" RS "отказ доменам только для части трафика (протокол, порт) ядро steer не выражает: блокировка имени закрывает его целиком" RS "правило пропущено, трафик идёт по следующим правилам" RS "уберите из правила протокол и порт, если сайт нужно закрыть совсем", where);
@@ -1268,7 +1351,7 @@ static int emit_rule_ex(struct tr *t, size_t idx, const struct jval *r, const ch
     free(sets);
     /* Свои условия правила — ещё один список. */
     struct pending_list own = { 0 };
-    if (add_dest(&own, r)) { plist_free(&ps); return tfail(t, "нет памяти"); }
+    if (add_dest(t, &own, r, where)) { plist_free(&ps); return tfail(t, "нет памяти"); }
     int has_own = own.dom.n || own.pfx.n;
     int has_dest = has_own || any_set;
     if (!has_dest && (nrs > 0 || missing)) {
@@ -1303,7 +1386,7 @@ static int emit_rule_ex(struct tr *t, size_t idx, const struct jval *r, const ch
             jarr_push(fr, jstr(client));
             jobj_set(rule, "for", fr);
         }
-        if (rnw.tcp || rnw.udp || rnw.ports[0]) {
+        if (rnw.tcp || rnw.udp || narrow_has_ports(&rnw)) {
             struct pending_list all = { .nw = rnw };
             const char *ln = NULL;
             char key[64];
@@ -1718,6 +1801,12 @@ int box_translate(const struct jval *cfg, const struct tr_opts *o, struct tr_res
         int has_dest = jget(r, "rule_set") || jget(r, "domain") || jget(r, "domain_suffix") ||
                        jget(r, "domain_keyword") || jget(r, "domain_regex");
         if (!has_dest || jget(r, "type")) continue;
+        if (jgetb(r, "invert", 0)) {
+            /* Инверсия имён каналу не нужна и не выражается: без этой проверки правило с
+             * набором, уже имеющим канал из маршрута, отпадало бы молча. */
+            tw(&t, "dns.rules[%zu]" RS "инверсия (invert) в правиле DNS ядро steer не выражает" RS "канал для имён правила не заведён" RS "перепишите условие без инверсии", i);
+            continue;
+        }
         /* Условия, которые не про имя (inbound, query_type, source_ip_cidr), каналу не нужны:
          * их проверяет коннектор до вопроса к dnsd. Снимаем их с копии правила. */
         struct jval *rc = jdup(r);
@@ -1801,6 +1890,8 @@ int box_translate(const struct jval *cfg, const struct tr_opts *o, struct tr_res
     names_free(&t.lnames);
     names_free(&t.cnames);
     free(t.resolve_sets);
+    for (size_t i = 0; i < t.ports_n; i++) free(t.ports_pool[i]);
+    free(t.ports_pool);
     res->warnings = t.warnings;
     res->missing_sets = t.missing_sets;
     res->report = t.report;
@@ -1860,6 +1951,7 @@ int cmd_box_translate(const struct box_opts *o, int argc, char **argv) {
 int cmd_box_needs(const struct box_opts *o) {
     char err[512];
     struct jval *cfg = box_load_config(o, err, sizeof err);
+    if (!cfg) { fprintf(stderr, "FATAL[0000] %s\n", err); return 1; }
     struct jval *need = jnew(J_ARR);
     jarr_push(need, jstr("steer-core"));
     const struct jval *obs = jget(cfg, "outbounds");
