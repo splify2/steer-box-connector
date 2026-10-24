@@ -38,7 +38,7 @@ struct tr {
     const char **resolve_sets;
     size_t resolve_n;
     int resolve_all;               /* resolve без условий — все следующие правила */
-    int quic_reject;               /* reject protocol quic до правил в туннели */
+    int allow_all;                 /* правило без назначения и клиента допустимо (reject protocol quic) */
     int self_used;                 /* заведён клиент router (self) */
     long override_port;            /* правило route-options: подмена порта у списков правила */
 };
@@ -527,6 +527,31 @@ static const char *ensure_direct(struct tr *t) {
     return "direct";
 }
 
+/* Выход block (steer 2.1.0): трафик правила не пропускается. */
+static const char *ensure_block(struct tr *t) {
+    if (!t->have_block) {
+        struct jval *d = jnew(J_OBJ);
+        jobj_set(d, "kind", jstr("block"));
+        jobj_set(t->outputs, "block", d);
+        t->have_block = 1;
+    }
+    return "block";
+}
+
+/* Ядро умеет block (вид выхода) и quic: block с 2.1.0. Строка — вывод `steerd version`
+ * («steer 2.1.0 (…)») или просто номер; не разобралось (в том числе «dev») — как старое ядро. */
+int box_steer_has_block(const char *text) {
+    if (!text) return 0;
+    if (!strncmp(text, "steer ", 6)) text += 6;
+    int v[3] = { 0, 0, 0 };
+    for (int i = 0; i < 3; i++) {
+        if (*text < '0' || *text > '9') return 0;
+        v[i] = (int)strtol(text, (char **)&text, 10);
+        if (i < 2) { if (*text != '.') return 0; text++; }
+    }
+    return v[0] > 2 || (v[0] == 2 && v[1] >= 1);
+}
+
 /* Узел туннеля — файл подписки. vless: сам outbound sing-box (подписка steer читает конфиг
  * sing-box, docs/vless.md, «Формат подписки»); остальные — ссылкой. */
 static int b64url_enc(const char *in, char *out, size_t n);
@@ -974,9 +999,14 @@ static const char *emit_output(struct tr *t, const char *tag, int depth) {
         return name;
     }
     case SBO_BLOCK: {
-        tw(t, "выход %s (block): вида block в steer пока нет — правила в него сняты", tag);
-        map_out(t, tag, "", "Block");
-        return NULL;
+        if (!t->o->block_ok) {
+            tw(t, "выход %s (block): ядро steer старше 2.1.0 (вида block нет) — правила в него сняты", tag);
+            map_out(t, tag, "", "Block");
+            return NULL;
+        }
+        const char *n = ensure_block(t);
+        map_out(t, tag, n, "Block");
+        return n;
     }
     case SBO_REMARK:
         tw(t, "выход %s: direct с routing_mark %#llx (zapret forkop) пока не переводится — "
@@ -1167,6 +1197,12 @@ static int rule_keys_ok(struct tr *t, const struct jval *r, const char *where) {
     return 1;
 }
 
+/* Назначение правила — имена (домены, наборы): резолвер steer отвечает на них сам. */
+static int rule_has_names(const struct jval *r) {
+    return jget(r, "domain") || jget(r, "domain_suffix") || jget(r, "domain_keyword") ||
+           jget(r, "domain_regex") || jget(r, "rule_set");
+}
+
 /* Одно правило sing-box → правила steer (по одному на сужение). */
 static int emit_rule_ex(struct tr *t, size_t idx, const struct jval *r, const char *out_name,
                         const char *sb_out, int force_realip, const char *dns_up, const char *section) {
@@ -1182,6 +1218,13 @@ static int emit_rule_ex(struct tr *t, size_t idx, const struct jval *r, const ch
     if (src) client = emit_client(t, src);
     struct narrow rnw;
     if (narrow_from_rule(t, r, &rnw, where)) return 0;
+    if (!strcmp(out_name, "block") && (rnw.tcp || rnw.udp || rnw.ports[0]) && rule_has_names(r)) {
+        /* Имена в block резолвер глушит целиком (A 0.0.0.0), сужение протокола и порта им не
+         * действует: правило закрыло бы сайт совсем, а не только его QUIC или порт. */
+        tw(t, "%s: отказ имён только для части трафика (протокол, порт) ядро не выражает — "
+           "правило снято, иначе имена закрылись бы целиком", where);
+        return 0;
+    }
     struct plist_set ps = { 0 };
     struct jval *rsv = jget(r, "rule_set");
     long nrs = rsv ? jstrlist(rsv, NULL, 0) : 0;
@@ -1220,7 +1263,7 @@ static int emit_rule_ex(struct tr *t, size_t idx, const struct jval *r, const ch
     char tagbuf[64];
     snprintf(tagbuf, sizeof tagbuf, "r%zu", idx);
     if (!has_dest) {
-        if (!client) {
+        if (!client && !t->allow_all) {
             tw(t, "%s: правило без условий назначения и клиента — весь трафик LAN; снято, "
                "чтобы не забрать лишнего", where);
             plist_free(&ps);
@@ -1230,9 +1273,11 @@ static int emit_rule_ex(struct tr *t, size_t idx, const struct jval *r, const ch
         char label[32];
         snprintf(label, sizeof label, "sb%zu", idx);
         jobj_set(rule, "name", jstr(label));
-        struct jval *fr = jnew(J_ARR);
-        jarr_push(fr, jstr(client));
-        jobj_set(rule, "for", fr);
+        if (client) {
+            struct jval *fr = jnew(J_ARR);
+            jarr_push(fr, jstr(client));
+            jobj_set(rule, "for", fr);
+        }
         if (rnw.tcp || rnw.udp || rnw.ports[0]) {
             struct pending_list all = { .nw = rnw };
             const char *ln = NULL;
@@ -1504,14 +1549,51 @@ int box_translate(const struct jval *cfg, const struct tr_opts *o, struct tr_res
             continue;
         }
         if (!strcmp(act, "reject")) {
-            const char *l[4];
-            long n = jget(r, "protocol") ? jstrlist(jget(r, "protocol"), l, 4) : 0;
-            if (n == 1 && !strcmp(l[0], "quic") && jlen(r) <= 3) {
-                t.quic_reject = 1;
-                tw(&t, "%s: отказ QUIC пока не переводится (нужен вид block)", where);
+            const char *pl[4];
+            long pn = jget(r, "protocol") ? jstrlist(jget(r, "protocol"), pl, 4) : 0;
+            int quic = pn == 1 && !strcmp(pl[0], "quic");
+            if (!t.o->block_ok) {
+                if (quic) tw(&t, "%s: отказ QUIC не переводится — ядро steer старше 2.1.0 (нужен вид block)", where);
+                else tw(&t, "%s: reject не переводится — ядро steer старше 2.1.0 (нужен вид block)", where);
                 continue;
             }
-            tw(&t, "%s: reject пока не переводится (нужен вид block в steer)", where);
+            if (jget(r, "protocol") && !quic) {
+                tw(&t, "%s: reject с protocol, кроме quic, ядро не выражает — правило снято", where);
+                continue;
+            }
+            struct jval *rc = jdup(r);
+            jobj_del(rc, "action");
+            jobj_del(rc, "method");
+            jobj_del(rc, "no_drop");
+            if (quic) {
+                /* reject protocol quic — «QUIC отвергать»: UDP/443 в выход block. Правило встаёт на
+                 * своё место в порядке, поэтому правила выше него QUIC своих адресов не теряют, как
+                 * и у sing-box. Ключ quic: block правила маршрута — другой механизм: он привязан к
+                 * назначениям правила с выходом, а у reject выхода нет. */
+                const struct jval *net = jget(rc, "network");
+                const char *nl[4];
+                long nn = net ? jstrlist(net, nl, 4) : 0;
+                if (jget(rc, "port") || jget(rc, "port_range") || (net && !(nn == 1 && !strcmp(nl[0], "udp")))) {
+                    tw(&t, "%s: reject protocol quic с портом или network, кроме udp, не переводится — правило снято", where);
+                    json_free(rc);
+                    continue;
+                }
+                if (rule_has_names(rc)) {
+                    tw(&t, "%s: reject protocol quic для имён или наборов не переводится — block глушил бы "
+                       "имена целиком, а не только QUIC; отказ QUIC к именам даёт quic: block у "
+                       "маршрутного правила, коннектор его не выводит", where);
+                    json_free(rc);
+                    continue;
+                }
+                jobj_del(rc, "protocol");
+                jobj_set(rc, "network", jstr("udp"));
+                jobj_set(rc, "port", jint(443));
+                t.allow_all = 1;
+            }
+            int rr = emit_rule_ex(&t, i, rc, ensure_block(&t), "block", 0, NULL, "route.rules");
+            t.allow_all = 0;
+            json_free(rc);
+            if (rr) break;
             continue;
         }
         const char *ob = NULL, *out = NULL;
@@ -1662,7 +1744,9 @@ int cmd_box_translate(const struct box_opts *o, int argc, char **argv) {
     char absdir[4096];
     if (!realpath(argv[0], absdir)) { fprintf(stderr, "FATAL[0000] %s: %s\n", argv[0], strerror(errno)); json_free(cfg); return 1; }
     snprintf(rsdir, sizeof rsdir, "%s/rulesets", absdir);
-    struct tr_opts to = { .dir = absdir, .ruleset_dir = rsdir };
+    struct box_settings set;
+    box_settings_load(&set);
+    struct tr_opts to = { .dir = absdir, .ruleset_dir = rsdir, .block_ok = box_steerd_has_block(set.steerd) };
     struct tr_result res;
     int rc = box_translate(cfg, &to, &res, err, sizeof err);
     json_free(cfg);

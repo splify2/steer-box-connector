@@ -480,6 +480,15 @@ static int lan_devices(const char **out, int max) {
  * иначе первая строка отказа в err. */
 int box_validate_spec(const struct box_settings *set, const char *spec, const char *state, char *err, size_t errn);
 
+/* Умеет ли установленный движок вид block и quic: block (steer 2.1.0): по `steerd version`.
+ * Нет движка или версия не разобралась — нет: перевод по-прежнему снимает reject с предупреждением. */
+int box_steerd_has_block(const char *steerd) {
+    char out[256];
+    const char *argv[] = { steerd, "version", NULL };
+    if (access(steerd, X_OK) || run_cmd(argv, out, sizeof out)) return 0;
+    return box_steer_has_block(out);
+}
+
 /* Перевод и, кроме первого раза, reload. Состояние коннектора не трогает — новую карту отдаёт в
  * *map, — поэтому годится и для рабочего потока (rt_select). */
 static int translate_run(struct box_rt *rt, struct jval *cfg, int first, struct jval **map,
@@ -488,7 +497,7 @@ static int translate_run(struct box_rt *rt, struct jval *cfg, int first, struct 
     int nd = lan_devices(devs, 16);
     struct tr_opts to = { .dir = rt->inst, .ruleset_dir = rt->rsdir, .lan_devices = devs,
                           .lan_n = (size_t)nd, .egress_mark = rt->default_mark, .router_self = 1,
-                          .selected = rt->selected };
+                          .selected = rt->selected, .block_ok = box_steerd_has_block(rt->set.steerd) };
     struct tr_result res;
     *map = NULL;
     char e1[512];
