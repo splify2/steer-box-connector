@@ -7,6 +7,7 @@
 
 var callStatus = rpc.declare({ object: 'steer-box', method: 'status' });
 var callReleases = rpc.declare({ object: 'steer-box', method: 'releases' });
+var callReport = rpc.declare({ object: 'steer-box', method: 'report' });
 var callInstall = rpc.declare({ object: 'steer-box', method: 'install', params: ['version', 'packages'] });
 
 var NAMES = {
@@ -54,6 +55,38 @@ function verGE(a, b) {
 			return (x[i] || 0) > (y[i] || 0);
 	}
 	return true;
+}
+
+/* Что из конфига sing-box не переводится в steer (отчёт последнего перевода службы). Каждая запись:
+ * где в конфиге, почему, что будет вместо и что делать; список свёрнут. */
+function reportBlock(rep) {
+	if (!rep || !rep.have)
+		return E('p', { 'style': 'opacity:.7' }, _('Отчёта пока нет: он появляется после первого запуска sing-box.'));
+	var items = rep.items || [];
+	var count = rep.count || 0;
+	var extra = rep.missing_sets > 0
+		? E('p', { 'style': 'opacity:.7' }, _('Наборов правил ещё не скачано: %d. Правила над ними встанут после загрузки.').format(rep.missing_sets))
+		: '';
+	if (!count)
+		return E('div', {}, [ E('p', { 'style': 'color:var(--success-color-high, #2e7d32)' }, '✓ ' + _('Всё переведено')), extra ]);
+	var rows = items.map(function(it) {
+		return E('div', { 'class': 'cbi-value', 'style': 'margin-bottom:.8em' }, [
+			E('div', {}, E('code', {}, it.where)),
+			E('div', {}, [ E('strong', {}, _('Почему: ')), it.why ]),
+			E('div', {}, [ E('strong', {}, _('Что будет вместо: ')), it.instead ]),
+			E('div', {}, [ E('strong', {}, _('Что делать: ')), it.todo ])
+		]);
+	});
+	if (count > items.length)
+		rows.push(E('p', { 'style': 'opacity:.7' }, _('… и ещё %d (показаны первые %d)').format(count - items.length, items.length)));
+	return E('div', {}, [
+		E('details', {}, [
+			E('summary', { 'style': 'cursor:pointer;color:var(--warn-color-high, #e65100)' },
+				'⚠ ' + _('Не переводится: %d').format(count)),
+			E('div', { 'style': 'margin-top:.6em' }, rows)
+		]),
+		extra
+	]);
 }
 
 function installBlock(st, rel) {
@@ -106,12 +139,13 @@ return view.extend({
 		return Promise.all([
 			callStatus(),
 			L.resolveDefault(callReleases(), { versions: [] }),
-			uci.load('steer-box')
+			uci.load('steer-box'),
+			L.resolveDefault(callReport(), null)
 		]);
 	},
 
 	render: function(data) {
-		var st = data[0] || {}, rel = data[1] || {};
+		var st = data[0] || {}, rel = data[1] || {}, rep = data[3];
 		var m, s, o;
 
 		m = new form.Map('steer-box', _('Steer Connector'),
@@ -153,6 +187,8 @@ return view.extend({
 						])
 					])
 				]),
+				E('h3', {}, _('Не переводится из конфига')),
+				reportBlock(rep),
 				E('h3', {}, _('Пакеты steer')),
 				packagesTable(st),
 				E('h3', {}, _('Установка steer')),

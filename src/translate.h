@@ -15,6 +15,7 @@
 #ifndef BOX_TRANSLATE_H
 #define BOX_TRANSLATE_H
 #include <stdint.h>
+#include <stdio.h>
 #include "json.h"
 
 struct tr_opts {
@@ -26,6 +27,7 @@ struct tr_opts {
     int router_self;               /* каналы на сам роутер (STEER_ROUTER_SELF): правила-двойники */
     int block_ok;                  /* ядро умеет block и quic: block (steer 2.1.0): box_steer_has_block */
     const struct jval *selected;   /* выбор селекторов: тег селектора → тег члена (Clash API) */
+    const char *report_path;       /* куда писать отчёт «что не переводится» (JSON); NULL — не писать */
 };
 
 struct tr_result {
@@ -33,7 +35,15 @@ struct tr_result {
     struct jval *map;
     unsigned warnings;
     unsigned missing_sets;         /* remote-наборов, которых ещё нет на диске */
+    struct jval *report;           /* массив {where, why, instead, todo}: каждое предупреждение */
 };
+
+/* Отчёт «что не переводится». Путь по умолчанию — /tmp/steer-box-report.json (tmpfs, не флеш);
+ * переменная STEER_BOX_REPORT подменяет его (стенды, rpcd). */
+const char *box_report_path(void);
+struct jval *box_report_doc(const struct tr_result *res);       /* документ для JSON; освобождает вызывающий */
+int box_report_save(const struct tr_result *res, const char *path);   /* 0 — записан атомарно */
+void box_report_print(FILE *out, const struct jval *doc);       /* для человека (документ отчёта) */
 
 /* 0 — переведено и записано; -1 — ошибка, текст в err. */
 int box_translate(const struct jval *cfg, const struct tr_opts *o, struct tr_result *res,
