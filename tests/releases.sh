@@ -336,6 +336,17 @@ PATH="$T/bin:$PATH" APK_WORLD="$T/apk.world" APK_DB="$T/apk.db" pkg_world_heal "
 check "bundle/install.sh: лечение world — ядро «именем», коннектор без пакета убран, чужое цело" \
       "steer-core zapret><QgoodZapretGoodZapretGoodZapretG=" "$(tr '\n' ' ' < "$T/apk.world" | sed 's/ $//')"
 rm -f "$T/apk.world" "$T/apk.db"
+# Чужое закрепление не переписывается, даже битое: с другим хешом при стоящем пакете и за пакетом,
+# которого в базе нет, — «чужой пакет — чужая настройка».
+printf '%s\n' 'steer-core><QnEWcoreNEWcoreNEWcoreNEWcor=' 'zapret><QoTherZapretOtherZapretOtherZ=' \
+    'gone-pkg><QgoneGoneGoneGoneGoneGoneGoneGo=' > "$T/apk.world"
+printf '%s\n' 'C:QoLdcoreOLDcoreOLDcoreOLDcoreO=' 'P:steer-core' 'V:2.0.0-r1' '' \
+    'C:QgoodZapretGoodZapretGoodZapretG=' 'P:zapret' 'V:72-r1' '' > "$T/apk.db"
+PATH="$T/bin:$PATH" APK_WORLD="$T/apk.world" APK_DB="$T/apk.db" pkg_world_heal
+check "лечение world: наше закрепление снято, чужие (с другим хешом, без пакета в базе) целы" \
+      "steer-core zapret><QoTherZapretOtherZapretOtherZ= gone-pkg><QgoneGoneGoneGoneGoneGoneGoneGo=" \
+      "$(tr '\n' ' ' < "$T/apk.world" | sed 's/ $//')"
+rm -f "$T/apk.world" "$T/apk.db"
 
 # Служба steer человека: со своей спекой и enabled install отказывает до загрузки и apk; без спеки
 # служба останавливается и выключается. Заглушка init пишет вызовы в $T/init.log.
