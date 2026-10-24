@@ -196,9 +196,8 @@ static void status_tick(struct ev *ev, void *arg) {
  * для forkop, и для будущих форков. */
 
 struct neut { int v6; char mark[48]; unsigned pref; };
-static struct neut g_neut[16];
-static size_t g_neut_n;
-static int g_neut_full;      /* о переполнении g_neut уже сказано */
+static struct neut *g_neut;     /* число меток соседа ничем не ограничено */
+static size_t g_neut_n, g_neut_cap;
 
 static int run_cmd(const char *const argv[], char *out, size_t outn) {
     int pfd[2];
@@ -249,13 +248,12 @@ static void neutralize_family(struct box_rt *rt, int v6) {
         for (size_t i = 0; i < g_neut_n; i++)
             if (g_neut[i].v6 == v6 && !strcmp(g_neut[i].mark, mark)) have = 1;
         if (have) continue;
-        if (g_neut_n >= sizeof g_neut / sizeof g_neut[0]) {
-            if (!g_neut_full) {
-                g_neut_full = 1;
-                LOGW("меток tproxy соседа больше %zu: метка %s (таблица %s) оставлена без правила в main",
-                     sizeof g_neut / sizeof g_neut[0], mark, table);
-            }
-            continue;
+        if (g_neut_n == g_neut_cap) {
+            size_t nc = g_neut_cap ? g_neut_cap * 2 : 16;
+            struct neut *nn = realloc(g_neut, nc * sizeof *nn);
+            if (!nn) { LOGW("нет памяти под метку tproxy %s: она оставлена без правила в main", mark); continue; }
+            g_neut = nn;
+            g_neut_cap = nc;
         }
         char p[16];
         snprintf(p, sizeof p, "%u", rt->set.rule_pref + 1);
@@ -285,7 +283,9 @@ static void neutralize_undo(void) {
         run_cmd(del, NULL, 0);
     }
     g_neut_n = 0;
-    g_neut_full = 0;
+    free(g_neut);
+    g_neut = NULL;
+    g_neut_cap = 0;
 }
 
 static void neut_tick(struct ev *ev, void *arg) {

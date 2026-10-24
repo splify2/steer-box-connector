@@ -1,6 +1,6 @@
 /* boxrun.c: метки tproxy соседа (neutralize_family) и разбор строк. Два дефекта:
- *  - g_neut на 16 меток: лишние молча пропускались; теперь 17-я метка остаётся без правила, но
- *    об этом один раз сказано в журнале (g_neut_full), и счёт `ip rule add` — ровно 16;
+ *  - g_neut на 16 меток: лишние пропускались; теперь число меток не ограничено, и на 17 меток
+ *    `ip rule add` вызван 17 раз;
  *  - strtok держит одно состояние на процесс: neut_tick в цикле событий и lan_devices в рабочем
  *    потоке (sel_work → translate_run) резали строки друг у друга. Теперь strtok_r.
  * Гонку ASan/UBSan детерминированно не ловят: второй сценарий проверяет результат разбора в
@@ -63,15 +63,14 @@ int main(void) {
     fake("ip", body);
     fake("uci", "#!/bin/sh\necho 'br-a br-b br-c'\n");
 
-    /* 1: 17 меток — правил ровно 16, о переполнении сказано. */
+    /* 1: 17 меток — правил 17, предела нет. */
     neutralize_family(&t_rt, 0);
-    CHECK(count_adds() == 16);
-    CHECK(g_neut_n == 16);
-    CHECK(g_neut_full == 1);
+    CHECK(count_adds() == 17);
+    CHECK(g_neut_n == 17);
     neutralize_family(&t_rt, 0);                 /* повтор: новых правил нет */
-    CHECK(count_adds() == 16);
+    CHECK(count_adds() == 17);
     neutralize_undo();
-    CHECK(g_neut_n == 0 && g_neut_full == 0);
+    CHECK(g_neut_n == 0);
 
     /* 2: lan_devices в этом потоке, neutralize_family в другом — разбор строк не мешает друг другу. */
     pthread_t th;

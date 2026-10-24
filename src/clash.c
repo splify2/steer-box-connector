@@ -959,7 +959,9 @@ static unsigned long long dev_bytes(const char *dev, const char *which) {
 static void traffic_now(struct box_rt *rt, unsigned long long *up, unsigned long long *down) {
     *up = *down = 0;
     const struct jval *outs = jget(rt->status, "outputs");
-    const char *seen[64];
+    /* Устройства без повторов: у нескольких выходов одно устройство считается один раз. */
+    const char **seen = calloc(jlen(outs) ? jlen(outs) : 1, sizeof *seen);
+    if (!seen) return;
     int ns = 0;
     for (size_t i = 0; i < jlen(outs); i++) {
         const struct jval *o = outs->o[i].val;
@@ -969,18 +971,11 @@ static void traffic_now(struct box_rt *rt, unsigned long long *up, unsigned long
         int dup = 0;
         for (int k = 0; k < ns; k++) if (!strcmp(seen[k], dev)) dup = 1;
         if (dup) continue;
-        if (ns >= 64) {
-            static int warned;
-            if (!warned) {
-                warned = 1;
-                LOGW("выходов steer с разными устройствами больше 64: устройство %s не входит в счётчик трафика", dev);
-            }
-            continue;
-        }
         seen[ns++] = dev;
         *up += dev_bytes(dev, "tx_bytes");
         *down += dev_bytes(dev, "rx_bytes");
     }
+    free(seen);
 }
 
 static void ws_tick(struct ev *ev, void *arg) {
