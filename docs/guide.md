@@ -38,7 +38,7 @@ mixed. Сами podkop и forkop не меняются и ставятся из 
 - `multiplex` у выходов;
 - серверный режим forkop, кроме сервера socks;
 - плагины shadowsocks, транспорт quic (V2Ray), выходы других типов (tuic, anytls, shadowtls,
-  wireguard и прочие), прежнюю запись сервера DNS через `address`, серверы DNS `h3`;
+  wireguard и прочие), прежнюю запись сервера DNS через `address`, серверы DNS `quic` (DoQ) и `h3`;
 - `sing-box generate tls-keypair` и `sing-box rule-set compile`.
 
 `reject` и выход `block` коннектор переводит в вид `block` ядра steer (нужно steer 2.1.0; коннектор

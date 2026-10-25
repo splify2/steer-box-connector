@@ -550,8 +550,14 @@ static void ck_dns(struct ck *c, const struct jval *dns) {
             else ck_err(c, s, "%s: нет type", w);
             continue;
         }
-        if (!strcmp(type, "udp") || !strcmp(type, "tcp") || !strcmp(type, "tls") ||
-            !strcmp(type, "quic") || !strcmp(type, "https") || !strcmp(type, "h3")) {
+        if (!strcmp(type, "quic") || !strcmp(type, "h3")) {
+            /* Свои вопросы (имена вне списков, свои соединения) коннектор отправляет серверу сам
+             * (dnsup.c: udp, tcp, tls, https). DoQ и DoH3 он не умеет: сервер не заводился бы, а
+             * каждый такой вопрос получал SERVFAIL, пока в журнале одна строка. Лучше отказ
+             * check с причиной, чем служба, у которой не отвечает DNS. */
+            ck_err(c, s, "%s: сервер DNS типа «%s» коннектор не поддерживает — нужен udp, tcp, tls или https", w, type);
+        } else if (!strcmp(type, "udp") || !strcmp(type, "tcp") || !strcmp(type, "tls") ||
+            !strcmp(type, "https")) {
             ck_keys(c, s, w, "type tag server server_port path headers tls" DIAL_KEYS);
             if (!jgets(s, "server")) ck_err(c, s, "%s: нет server", w);
             ck_port(c, s, "server_port", w, 0);

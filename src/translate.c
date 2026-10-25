@@ -1488,7 +1488,7 @@ static struct jval *dns_upstream(struct tr *t, const struct jval *srv) {
                        : !strcmp(type, "tls") ? "tls" : !strcmp(type, "https") ? "https"
                        : !strcmp(type, "quic") ? "quic" : NULL;
     if (!scheme) {
-        tw(t, "dns.servers[tag=%s]" RS "тип DNS-сервера «%s» не бывает апстримом steer" RS "сервер пропущен" RS "используйте udp, tcp, tls, https или quic-сервер", jgets(srv, "tag"), type);
+        tw(t, "dns.servers[tag=%s]" RS "тип DNS-сервера «%s» не бывает апстримом steer" RS "сервер пропущен" RS "используйте udp, tcp, tls или https", jgets(srv, "tag"), type);
         return NULL;
     }
     unsigned char a[16];
