@@ -1485,8 +1485,7 @@ static struct jval *dns_upstream(struct tr *t, const struct jval *srv) {
     long port = jgeti(srv, "server_port", 0);
     char url[600];
     const char *scheme = !strcmp(type, "udp") ? "udp" : !strcmp(type, "tcp") ? "tcp"
-                       : !strcmp(type, "tls") ? "tls" : !strcmp(type, "https") ? "https"
-                       : !strcmp(type, "quic") ? "quic" : NULL;
+                       : !strcmp(type, "tls") ? "tls" : !strcmp(type, "https") ? "https" : NULL;
     if (!scheme) {
         tw(t, "dns.servers[tag=%s]" RS "тип DNS-сервера «%s» не бывает апстримом steer" RS "сервер пропущен" RS "используйте udp, tcp, tls или https", jgets(srv, "tag"), type);
         return NULL;
@@ -1514,7 +1513,7 @@ static struct jval *dns_upstream(struct tr *t, const struct jval *srv) {
         if (o && strcmp(o, "direct")) jobj_set(u, "out", jstr(o));
     }
     if (!is_ip && strcmp(scheme, "udp") && strcmp(scheme, "tcp")) {
-        /* Имя сервера DoT/DoH/DoQ: bootstrap — сервер из domain_resolver, если это udp с
+        /* Имя сервера DoT/DoH: bootstrap — сервер из domain_resolver, если это udp с
          * адресом. */
         const struct jval *dr = jget(srv, "domain_resolver");
         const char *rt = dr ? (dr->t == J_STR ? dr->s : jgets(dr, "server")) : NULL;

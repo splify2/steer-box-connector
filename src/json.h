@@ -50,7 +50,6 @@ struct jval *jnew(enum jtype t);
 struct jval *jstr(const char *s);
 struct jval *jstrn(const char *s, size_t n);
 struct jval *jint(int64_t i);
-struct jval *jnum(double d);
 struct jval *jbool(int b);
 struct jval *jnull(void);
 int jarr_push(struct jval *arr, struct jval *v);              /* 0 — принято */

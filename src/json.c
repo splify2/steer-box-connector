@@ -32,15 +32,6 @@ struct jval *jint(int64_t i) {
     return v;
 }
 
-struct jval *jnum(double d) {
-    struct jval *v = jnew(J_NUM);
-    if (!v) return NULL;
-    v->d = d;
-    /* Целое значение пишется целым: Clash API отдаёт задержки и байты числами без точки. */
-    if (d == floor(d) && fabs(d) < 9.0e15) { v->is_int = 1; v->i = (int64_t)d; }
-    return v;
-}
-
 struct jval *jbool(int b) {
     struct jval *v = jnew(J_BOOL);
     if (v) v->b = !!b;
